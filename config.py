@@ -2,13 +2,13 @@ import dataclasses
 import json
 import os
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 
 @dataclass
 class SpellCheckerConfig:
-    stats_path: str = "language_stats"
-    dict_path: str = "wordlist.dic"
+    stats_path: str = "trained_model"
+    dict_path: Optional[str] = None
 
     top_n: int = 25
 

@@ -27,6 +27,25 @@ Chế độ chạy:
 - `DEBUG=true`: dùng Flask dev server
 - mặc định: ưu tiên `waitress` để chạy ổn định lâu dài trên máy
 
+## Cấu trúc thư mục
+
+```
+TinyMLS/
+├── data/               # Dữ liệu (corpus + dictionary)
+│   ├── corpus/         # Dữ liệu văn bản thô (.txt) để train
+│   └── wordlist.dic    # Từ điển tiếng Việt chuẩn
+├── builder.py          # Xây dựng N-gram language model từ corpus
+├── trained_model/      # Model artifacts (unigrams.trie, bigrams.trie, ...)
+├── model_pkg.py        # Export/Import model thành 1 file .tinymls duy nhất
+├── checker.py          # Inference engine (NGramSpellChecker)
+├── config.py           # SpellCheckerConfig dataclass
+├── config.json         # Runtime configuration
+├── keyboard.py         # QWERTY keyboard layout
+├── telex.py            # Telex encoding conversion
+├── api.py              # Flask REST API
+└── main.py             # Entry point
+```
+
 ## API
 
 Server đọc cấu hình từ `config.json`. Frontend không truyền path hay file cấu hình lên API.
@@ -68,7 +87,7 @@ Request body:
 - `text`: chuỗi cần kiểm tra, bắt buộc
 - `top_k`: số gợi ý cần trả về, mặc định `5`
 
-Các path cấu hình như `config`, `stats`, `dict` được lấy từ `config.json` phía server, frontend không truyền lên.
+Các path cấu hình (`stats_path`, `dict_path`) được lấy từ `config.json`/`config.py` phía server, frontend không truyền lên.
 
 Ví dụ:
 
@@ -113,7 +132,7 @@ Request body:
 
 - `workers`: số worker xử lý, mặc định `1`
 
-`data/` là thư mục input cố định phía server. `stats_path` và `dict_path` được lấy từ `config.json`.
+`data/corpus/` là thư mục input cố định phía server. Các đường dẫn lấy từ `config.json` hoặc dùng mặc định trong `config.py`.
 
 Ví dụ:
 
@@ -152,6 +171,65 @@ const data = await response.json();
 ```
 
 Server đã bật CORS `*`, nên có thể gọi trực tiếp từ frontend chạy domain khác trong môi trường phát triển.
+
+### `POST /api/export`
+
+Export model thành file `.tinymls` duy nhất. Các thành phần trong file không cố định — chỉ gồm những gì tồn tại trong thư mục stats (vd: bỏ qua `trigrams.trie` nếu không có).
+
+Request body:
+
+- `output`: đường dẫn file đầu ra, mặc định `model.tinymls`
+
+Ví dụ:
+
+```bash
+curl -X POST http://localhost:8000/api/export \
+  -H "Content-Type: application/json" \
+  -d '{"output": "my_model.tinymls"}'
+```
+
+## Model packages (`.tinymls`)
+
+File `.tinymls` là zip chứa toàn bộ model thành 1 file duy nhất.
+
+### Sử dụng
+
+```python
+from config import SpellCheckerConfig
+from checker import NGramSpellChecker
+
+# Load trực tiếp từ .tinymls (không giải nén thủ công)
+cfg = SpellCheckerConfig(stats_path='model.tinymls')
+checker = NGramSpellChecker(cfg)
+checker.correct_sentence('toi dang go tieng viet')
+checker.close()  # dọn temp files
+```
+
+### `dict_path`
+
+- Mặc định `None` — không tự động tìm file từ điển
+- Nếu load từ `.tinymls` có chứa `dictionary.dic`, checker tự động dùng
+- Nếu chỉ định `dict_path` rõ ràng → ưu tiên dùng file đó
+
+```python
+# Dùng dictionary.dic trong package (nếu có)
+cfg = SpellCheckerConfig(stats_path='model.tinymls')
+
+# Ghi đè: dùng file riêng
+cfg = SpellCheckerConfig(stats_path='model.tinymls', dict_path='data/wordlist.dic')
+```
+
+## Export model (CLI)
+
+```bash
+# Export to file
+python main.py --export model.tinymls
+
+# Hoặc dùng công cụ riêng
+python model_pkg.py export --stats trained_model --output model.tinymls
+python model_pkg.py export --stats trained_model --dict data/wordlist.dic -o model.tinymls
+python model_pkg.py extract model.tinymls -o my_model
+```
 
 ## Ghi chú vận hành
 

@@ -10,10 +10,11 @@ from flask import Flask, jsonify, request
 from builder import build_language_stats_from_folder
 from checker import NGramSpellChecker
 from config import SpellCheckerConfig
+from model_pkg import export_model_package
 
 CheckerCacheKey = tuple[str, str, str | None, bool, bool]
 SERVER_CONFIG_PATH = "config.json"
-SERVER_DATA_FOLDER = "data"
+SERVER_DATA_FOLDER = "data/corpus"
 MAX_INPUT_CHARS = 2000
 
 
@@ -220,6 +221,32 @@ def check_text() -> Any:
     )
 
 
+def export_stats() -> Any:
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    payload = request.get_json(silent=True) or {}
+    server_config = get_server_config()
+    output = payload.get("output", "model.tinymls")
+
+    stdout_buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(stdout_buffer):
+            export_model_package(
+                stats_path=server_config.stats_path,
+                config_path=SERVER_CONFIG_PATH,
+                dict_path=server_config.dict_path,
+                output_path=output,
+            )
+        return jsonify({
+            "message": "Export hoàn tất.",
+            "output": os.path.abspath(output),
+            "logs": normalize_logs(stdout_buffer.getvalue()),
+        })
+    except Exception as exc:
+        return jsonify({"error": str(exc), "logs": normalize_logs(stdout_buffer.getvalue())}), 500
+
+
 def build_stats() -> Any:
     if request.method == "OPTIONS":
         return ("", 204)
@@ -281,6 +308,7 @@ def create_app() -> Flask:
     app.add_url_rule("/api/health", view_func=health, methods=["GET", "OPTIONS"])
     app.add_url_rule("/api/check", view_func=check_text, methods=["POST", "OPTIONS"])
     app.add_url_rule("/api/build", view_func=build_stats, methods=["POST", "OPTIONS"])
+    app.add_url_rule("/api/export", view_func=export_stats, methods=["POST", "OPTIONS"])
     try:
         service.preload()
     except Exception:

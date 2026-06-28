@@ -305,7 +305,7 @@ def iter_corpus_files(folder_path: str) -> Iterator[str]:
 
 def build_language_stats_from_folder(
     folder_path: str,
-    output_dir="language_stats",
+    output_dir="trained_model",
     external_dict_path: str | None = None,
     num_workers: int = 1,
 ) -> None:

@@ -11,6 +11,7 @@ from rapidfuzz import fuzz, process
 
 from config import SpellCheckerConfig
 from keyboard import get_keyboard_coordinates, keyboard_matrix
+from model_pkg import ModelArchive
 from telex import to_standard_telex
 
 
@@ -24,30 +25,81 @@ class NGramSpellChecker:
         self.cfg = config
         self.debug = debug
         self.detail_log = detail_log
+        self._archive: ModelArchive | None = None
 
-        print(f"Loading dữ liệu thống kê từ thư mục: {self.cfg.stats_path}...")
+        if os.path.isdir(self.cfg.stats_path):
+            self._load_from_dir()
+        elif self.cfg.stats_path.endswith(".tinymls") or self.cfg.stats_path.endswith(".zip"):
+            self._load_from_archive()
+        else:
+            raise FileNotFoundError(f"Không tìm thấy model: {self.cfg.stats_path}")
 
-        meta_path = os.path.join(self.cfg.stats_path, "language_stats_meta.json")
-        with open(meta_path, "r", encoding="utf-8") as f:
+    def _resolve_dict_path(self) -> str | None:
+        if self.cfg.dict_path and os.path.exists(self.cfg.dict_path):
+            return self.cfg.dict_path
+        return None
+
+    def _load_standard_dict(self, dict_path: str | None) -> None:
+        self.standard_dict: Set[str] = set()
+        if not dict_path:
+            return
+        try:
+            with open(dict_path, "r", encoding="utf-8") as f:
+                self.standard_dict = {
+                    line.strip().lower() for line in f if line.strip()
+                }
+            print(f"Đã nạp {len(self.standard_dict)} từ chuẩn từ '{dict_path}'.")
+        except FileNotFoundError:
+            pass
+
+    def _load_from_dir(self) -> None:
+        stats_dir = self.cfg.stats_path
+        print(f"Loading dữ liệu thống kê từ thư mục: {stats_dir}...")
+
+        with open(os.path.join(stats_dir, "language_stats_meta.json"), encoding="utf-8") as f:
             meta = json.load(f)
 
         vocab_list = [unicodedata.normalize("NFC", w) for w in meta["vocab"]]
-
-        vocab: Set[str] = set(vocab_list)
         self.total_unigrams = meta["total_unigrams"]
 
         self.unigrams = marisa_trie.RecordTrie("<I").mmap(
-            os.path.join(self.cfg.stats_path, "unigrams.trie")
+            os.path.join(stats_dir, "unigrams.trie")
         )
         self.bigrams = marisa_trie.RecordTrie("<I").mmap(
-            os.path.join(self.cfg.stats_path, "bigrams.trie")
+            os.path.join(stats_dir, "bigrams.trie")
         )
+        tri_path = os.path.join(stats_dir, "trigrams.trie")
+        self.trigrams = marisa_trie.RecordTrie("<I").mmap(tri_path) if os.path.exists(tri_path) else None
 
-        tri_path = os.path.join(self.cfg.stats_path, "trigrams.trie")
-        if os.path.exists(tri_path):
-            self.trigrams = marisa_trie.RecordTrie("<I").mmap(tri_path)
-        else:
-            self.trigrams = None
+        self._init_from_vocab(vocab_list)
+        self._load_standard_dict(self._resolve_dict_path())
+
+    def _load_from_archive(self) -> None:
+        self._archive = ModelArchive(self.cfg.stats_path)
+        print(f"Loading dữ liệu thống kê từ package: {self.cfg.stats_path}...")
+
+        meta = self._archive.read_json("language_stats_meta.json")
+        vocab_list = [unicodedata.normalize("NFC", w) for w in meta["vocab"]]
+        self.total_unigrams = meta["total_unigrams"]
+
+        self.unigrams = self._archive.mmap_trie("unigrams.trie")
+        self.bigrams = self._archive.mmap_trie("bigrams.trie")
+        self.trigrams = self._archive.mmap_trie("trigrams.trie") if self._archive.has("trigrams.trie") else None
+
+        self._init_from_vocab(vocab_list)
+
+        dict_path = self._resolve_dict_path()
+        if not dict_path and self._archive.has("dictionary.dic"):
+            dict_path = self._archive.extract_file("dictionary.dic")
+        self._load_standard_dict(dict_path)
+
+    def close(self) -> None:
+        if self._archive:
+            self._archive.close()
+            self._archive = None
+
+    def _init_from_vocab(self, vocab_list: list[str]) -> None:
+        vocab: Set[str] = set(vocab_list)
 
         self.telex_to_vocab: Dict[str, List[str]] = {}
         for w in vocab_list:
@@ -56,25 +108,10 @@ class NGramSpellChecker:
                 self.telex_to_vocab[t] = []
             self.telex_to_vocab[t].append(w)
 
-        telex_vocab_list: List[str] = list(self.telex_to_vocab.keys())
+        telex_vocab_list: list[str] = list(self.telex_to_vocab.keys())
         self.telex_by_length = defaultdict(list)
         for t in telex_vocab_list:
             self.telex_by_length[len(t)].append(t)
-
-        self.standard_dict: Set[str] = set()
-        if self.cfg.dict_path:
-            try:
-                with open(self.cfg.dict_path, "r", encoding="utf-8") as f:
-                    self.standard_dict = {
-                        line.strip().lower() for line in f if line.strip()
-                    }
-                print(
-                    f"Đã nạp {len(self.standard_dict)} từ chuẩn từ '{self.cfg.dict_path}'."
-                )
-            except FileNotFoundError:
-                print(
-                    f"Không tìm thấy từ điển '{self.cfg.dict_path}'. Tính năng liên quan sẽ bị vô hiệu hoá."
-                )
 
         sorted_unigrams = sorted(
             self.unigrams.items(), key=lambda item: item[1], reverse=True
