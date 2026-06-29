@@ -299,13 +299,17 @@ def _process_corpus_file(
     )
 
 
-def iter_corpus_files(folder_path: str) -> Iterator[str]:
+def iter_corpus_files(folder_path: str, recursive: bool = False) -> Iterator[str]:
     if not os.path.exists(folder_path):
         raise FileNotFoundError(f"File not found: {folder_path}")
 
-    for filename in sorted(os.listdir(folder_path)):
-        if filename.endswith(".txt"):
-            yield os.path.join(folder_path, filename)
+    entries = sorted(os.listdir(folder_path))
+    for entry in entries:
+        full_path = os.path.join(folder_path, entry)
+        if recursive and os.path.isdir(full_path):
+            yield from iter_corpus_files(full_path, recursive=True)
+        elif entry.endswith(".txt"):
+            yield full_path
 
 
 def build_language_stats_from_folder(
@@ -313,6 +317,7 @@ def build_language_stats_from_folder(
     output_dir="trained_model",
     external_dict_path: str | None = None,
     num_workers: int = 1,
+    recursive: bool = False,
 ) -> None:
     print("Xây dựng thống kê N-gram từ corpus...")
 
@@ -322,7 +327,7 @@ def build_language_stats_from_folder(
     vocab_set: Set[str] = set()
     sequence_count = 0
 
-    file_paths = list(iter_corpus_files(folder_path))
+    file_paths = list(iter_corpus_files(folder_path, recursive=recursive))
     if not file_paths:
         raise ValueError("Không có dữ liệu để xử lý.")
 

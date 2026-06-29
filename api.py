@@ -257,6 +257,7 @@ def build_stats() -> Any:
 
     payload = request.get_json(silent=True) or {}
     workers = int(payload.get("workers", 1))
+    recursive = bool(payload.get("recursive", False))
     server_config = get_server_config()
 
     stdout_buffer = io.StringIO()
@@ -270,6 +271,7 @@ def build_stats() -> Any:
                 output_dir=server_config.stats_path,
                 external_dict_path=server_config.dict_path,
                 num_workers=workers,
+                recursive=recursive,
             )
         service.clear_cache()
         service.preload()

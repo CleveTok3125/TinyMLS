@@ -135,6 +135,7 @@ Build lại bộ thống kê ngôn ngữ từ corpus.
 Request body:
 
 - `workers`: số worker xử lý, mặc định `1`
+- `recursive`: `true` nếu muốn đọc đệ quy file `.txt` từ thư mục con, mặc định `false`
 
 `data/corpus/` là thư mục input cố định phía server. Các đường dẫn lấy từ `config.json` hoặc dùng mặc định trong `config.py`.
 
@@ -144,7 +145,8 @@ Ví dụ:
 curl -X POST http://localhost:8000/api/build \
   -H "Content-Type: application/json" \
   -d '{
-    "workers": 2
+    "workers": 4,
+    "recursive": true
   }'
 ```
 
@@ -240,3 +242,5 @@ python model_pkg.py extract model.tinymls -o my_model
 - Checker được preload khi server khởi động để giảm độ trễ ở request đầu tiên.
 - Trong lúc build thống kê, request check mới sẽ chờ build hoàn tất rồi mới xử lý.
 - API giới hạn input `text` tối đa 2000 ký tự cho mỗi request.
+- Builder mặc định chỉ đọc file `.txt` ở thư mục cấp 1. Dùng `recursive=true` để đọc đệ quy vào thư mục con.
+- Builder chấp nhận cả từ tiếng Việt và tiếng Anh (từ chỉ gồm chữ cái) vào vocabulary, giúp model không sửa nhầm từ ngoại lai.
