@@ -3,6 +3,7 @@ import math
 import os
 import unicodedata
 from collections import defaultdict
+from enum import Enum
 from functools import lru_cache
 from typing import Dict, List, Set, Tuple
 
@@ -13,6 +14,31 @@ from config import SpellCheckerConfig
 from keyboard import get_keyboard_coordinates, keyboard_matrix
 from model_pkg import ModelArchive
 from telex import to_standard_telex
+
+
+class CasePattern(Enum):
+    ALLCASE = "allcase"
+    LOWER = "lower"
+    INITCASE = "initcase"
+
+
+def detect_case_pattern(word: str) -> CasePattern:
+    letters = [c for c in word if c.isalpha()]
+    if not letters:
+        return CasePattern.LOWER
+    if all(c.isupper() for c in letters):
+        return CasePattern.ALLCASE
+    if all(c.islower() for c in letters):
+        return CasePattern.LOWER
+    return CasePattern.INITCASE
+
+
+def apply_case_pattern(word: str, pattern: CasePattern) -> str:
+    if pattern == CasePattern.ALLCASE:
+        return word.upper()
+    if pattern == CasePattern.LOWER:
+        return word.lower()
+    return word.capitalize()
 
 
 class NGramSpellChecker:
@@ -387,7 +413,9 @@ class NGramSpellChecker:
         return False
 
     def correct_sentence(self, sentence: str, top_k: int = 5) -> List[str]:
-        words: List[str] = sentence.lower().split()
+        original_words: List[str] = sentence.split()
+        case_patterns = [detect_case_pattern(w) for w in original_words]
+        words: List[str] = [w.lower() for w in original_words]
         if not words:
             return []
 
@@ -527,7 +555,12 @@ class NGramSpellChecker:
 
             results = []
             for _, best_sentence, _ in sorted_paths[:top_k]:
-                results.append(" ".join(best_sentence))
+                restored = [
+                    apply_case_pattern(best_sentence[i], case_patterns[i])
+                    if i < len(case_patterns) else best_sentence[i]
+                    for i in range(len(best_sentence))
+                ]
+                results.append(" ".join(restored))
 
             return results
 
