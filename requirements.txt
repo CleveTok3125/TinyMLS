@@ -3,3 +3,4 @@ tqdm>=4.67.3
 marisa-trie>=1.4.0
 RapidFuzz>=3.14.3
 waitress>=3.0.2
+chardet>=5.2.0

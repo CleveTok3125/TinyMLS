@@ -6,6 +6,7 @@ from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from typing import Iterable, Iterator, List, Set
 
+import chardet
 import marisa_trie
 
 try:
@@ -205,19 +206,22 @@ def _save_language_stats(
 
     os.makedirs(output_dir, exist_ok=True)
 
-    unigram_trie.save(os.path.join(output_dir, "unigrams.trie"))
-    bigram_trie.save(os.path.join(output_dir, "bigrams.trie"))
-    trigram_trie.save(os.path.join(output_dir, "trigrams.trie"))
+    try:
+        unigram_trie.save(os.path.join(output_dir, "unigrams.trie"))
+        bigram_trie.save(os.path.join(output_dir, "bigrams.trie"))
+        trigram_trie.save(os.path.join(output_dir, "trigrams.trie"))
 
-    metadata = {
-        "vocab": sorted(vocab_set),
-        "total_unigrams": sum(unigram_counts.values()),
-    }
+        metadata = {
+            "vocab": sorted(vocab_set),
+            "total_unigrams": sum(unigram_counts.values()),
+        }
 
-    with open(
-        os.path.join(output_dir, "language_stats_meta.json"), "w", encoding="utf-8"
-    ) as f:
-        json.dump(metadata, f, ensure_ascii=False, indent=4)
+        with open(
+            os.path.join(output_dir, "language_stats_meta.json"), "w", encoding="utf-8"
+        ) as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=4)
+    except OSError as e:
+        raise OSError(f"Không thể ghi dữ liệu ra '{output_dir}': {e}") from e
 
     print(f"Done! Toàn bộ dữ liệu thống kê đã được lưu tại: {output_dir}/")
 
@@ -234,8 +238,8 @@ def _load_external_vocab(vocab_set: Set[str], external_dict_path: str | None) ->
                 if is_valid_word(w):
                     vocab_set.add(w)
         print(f"-> Đã nạp thêm từ vựng. Tổng Vocab hiện tại: {len(vocab_set)} từ.")
-    except FileNotFoundError:
-        print(f"File not found: '{external_dict_path}'. Skip this step.")
+    except OSError:
+        print(f"Không thể đọc file: '{external_dict_path}'. Bỏ qua bước này.")
 
 
 def _progress(iterable, total: int | None = None, desc: str = "", unit: str = "file"):
@@ -251,6 +255,16 @@ def _progress(iterable, total: int | None = None, desc: str = "", unit: str = "f
     )
 
 
+def _detect_encoding(file_path: str) -> str:
+    try:
+        with open(file_path, "rb") as f:
+            raw = f.read(min(10000, os.path.getsize(file_path)))
+    except OSError:
+        return "utf-8"
+    result = chardet.detect(raw)
+    return result["encoding"] or "utf-8"
+
+
 def _process_corpus_file(
     file_path: str,
     show_progress: bool = False,
@@ -260,22 +274,23 @@ def _process_corpus_file(
     trigram_counts: Counter[str] = Counter()
     vocab_set: Set[str] = set()
     sequence_count = 0
-
-    file_size = os.path.getsize(file_path)
     progress_bar = None
-    if show_progress and tqdm is not None:
-        progress_bar = tqdm(
-            total=file_size,
-            desc=os.path.basename(file_path),
-            unit="B",
-            unit_scale=True,
-            unit_divisor=1024,
-            dynamic_ncols=True,
-            leave=False,
-        )
 
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
+        file_size = os.path.getsize(file_path)
+        if show_progress and tqdm is not None:
+            progress_bar = tqdm(
+                total=file_size,
+                desc=os.path.basename(file_path),
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                dynamic_ncols=True,
+                leave=False,
+            )
+
+        enc = _detect_encoding(file_path)
+        with open(file_path, "r", encoding=enc, errors="replace") as f:
             for line in f:
                 sequence_count += _update_ngram_counts_from_sequences(
                     iter_valid_sequences(line),
@@ -285,7 +300,9 @@ def _process_corpus_file(
                     vocab_set,
                 )
                 if progress_bar is not None:
-                    progress_bar.update(len(line.encode("utf-8")))
+                    progress_bar.update(len(line.encode(enc, errors="replace")))
+    except OSError:
+        print(f"\nCảnh báo: Bỏ qua '{os.path.basename(file_path)}' — lỗi đọc file.")
     finally:
         if progress_bar is not None:
             progress_bar.close()
