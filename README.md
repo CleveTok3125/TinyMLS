@@ -7,7 +7,11 @@ TinyMLS is not yet Machine Learning-based Spellchecker
 Yêu cầu cài dependency trong `requirements.txt`.
 
 ```bash
+# Dùng thư mục trained_model/ (mặc định)
 python main.py
+
+# Dùng file .tinymls (tự động, không cần config riêng)
+python main.py model.tinymls
 ```
 
 Biến môi trường hỗ trợ:
@@ -19,7 +23,7 @@ Biến môi trường hỗ trợ:
 Ví dụ:
 
 ```bash
-HOST=127.0.0.1 PORT=8000 python main.py
+HOST=127.0.0.1 PORT=8000 python main.py model.tinymls
 ```
 
 Chế độ chạy:

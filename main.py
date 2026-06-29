@@ -9,6 +9,8 @@ app = create_app()
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="TinyMLS Spell Check Server")
+    parser.add_argument("model", nargs="?", metavar="MODEL",
+                        help="Path to .tinymls model package (default: trained_model/)")
     parser.add_argument("--export", metavar="OUTPUT", nargs="?", const="model.tinymls",
                         help="Export trained model to .tinymls package and exit")
     args = parser.parse_args()
@@ -22,6 +24,8 @@ def main() -> None:
             output_path=args.export,
         )
         return
+
+    app = create_app(model_path=args.model)
 
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8000"))

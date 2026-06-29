@@ -15,6 +15,7 @@ from model_pkg import export_model_package
 CheckerCacheKey = tuple[str, str, str | None, bool, bool]
 SERVER_CONFIG_PATH = "config.json"
 SERVER_DATA_FOLDER = "data/corpus"
+SERVER_MODEL_PATH: str | None = None
 MAX_INPUT_CHARS = 2000
 
 
@@ -159,7 +160,10 @@ service = SpellCheckerService()
 
 
 def get_server_config() -> SpellCheckerConfig:
-    return SpellCheckerConfig.from_json(SERVER_CONFIG_PATH)
+    config = SpellCheckerConfig.from_json(SERVER_CONFIG_PATH)
+    if SERVER_MODEL_PATH:
+        config.stats_path = SERVER_MODEL_PATH
+    return config
 
 
 def normalize_logs(raw_logs: str) -> str:
@@ -301,7 +305,9 @@ def build_stats() -> Any:
     return response
 
 
-def create_app() -> Flask:
+def create_app(model_path: str | None = None) -> Flask:
+    global SERVER_MODEL_PATH
+    SERVER_MODEL_PATH = model_path
     app = Flask(__name__)
     app.json.ensure_ascii = False
     app.after_request(add_cors_headers)
