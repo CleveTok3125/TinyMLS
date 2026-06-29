@@ -78,6 +78,11 @@ def is_valid_vietnamese_word(word: str) -> bool:
     return True
 
 
+def is_valid_word(word: str) -> bool:
+    word = unicodedata.normalize("NFC", word)
+    return word.isalpha() and 1 <= len(word) <= 15
+
+
 def extract_valid_sequences(raw_text: str) -> List[List[str]]:
     text = raw_text.lower()
 
@@ -95,7 +100,7 @@ def extract_valid_sequences(raw_text: str) -> List[List[str]]:
                 current_seq = []
             continue
 
-        if is_valid_vietnamese_word(w):
+        if is_valid_word(w):
             current_seq.append(w)
         else:
             if current_seq:
@@ -120,7 +125,7 @@ def iter_valid_sequences(raw_text: str) -> Iterator[List[str]]:
                 current_seq = []
             continue
 
-        if is_valid_vietnamese_word(w):
+        if is_valid_word(w):
             current_seq.append(w)
         elif current_seq:
             yield current_seq
@@ -226,7 +231,7 @@ def _load_external_vocab(vocab_set: Set[str], external_dict_path: str | None) ->
         with open(external_dict_path, "r", encoding="utf-8") as f:
             for line in f:
                 w = line.strip().lower()
-                if is_valid_vietnamese_word(w):
+                if is_valid_word(w):
                     vocab_set.add(w)
         print(f"-> Đã nạp thêm từ vựng. Tổng Vocab hiện tại: {len(vocab_set)} từ.")
     except FileNotFoundError:
