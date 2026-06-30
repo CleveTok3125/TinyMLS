@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import io
 import os
 import time
@@ -11,8 +12,9 @@ from builder import build_language_stats_from_folder
 from checker import NGramSpellChecker
 from config import SpellCheckerConfig
 from model_pkg import export_model_package
+from personalization import PersonalizationManager
 
-CheckerCacheKey = tuple[str, str, str | None, bool, bool]
+CheckerCacheKey = tuple[str, str, str | None, bool, bool, str | None]
 SERVER_CONFIG_PATH = "config.json"
 SERVER_DATA_FOLDER = "data/corpus"
 SERVER_MODEL_PATH: str | None = None
@@ -30,6 +32,8 @@ class SpellCheckerService:
         self._active_requests = 0
         self._build_in_progress = False
         self._last_load_error: str | None = None
+        self._personalization_cache: dict[str, PersonalizationManager] = {}
+        self._personalization_cache_lock = Lock()
 
     def clear_cache(self) -> None:
         with self._cache_lock:
@@ -57,6 +61,7 @@ class SpellCheckerService:
         dict_path: str | None,
         debug: bool = False,
         detail: bool = False,
+        personalization: PersonalizationManager | None = None,
     ) -> NGramSpellChecker:
         config = self._build_config(config_path, stats_path, dict_path)
 
@@ -65,7 +70,15 @@ class SpellCheckerService:
                 f"Không tìm thấy thư mục dữ liệu thống kê tại '{config.stats_path}'."
             )
 
-        cache_key = (config_path, config.stats_path, config.dict_path, debug, detail)
+        pers_hash = personalization.user_hash if personalization else None
+        cache_key = (
+            config_path,
+            config.stats_path,
+            config.dict_path,
+            debug,
+            detail,
+            pers_hash,
+        )
         with self._cache_lock:
             checker = self._cache.get(cache_key)
             if checker is None:
@@ -74,6 +87,7 @@ class SpellCheckerService:
                         config=config,
                         debug=debug,
                         detail_log=detail,
+                        personalization=personalization,
                     )
                 self._cache[cache_key] = checker
 
@@ -99,13 +113,25 @@ class SpellCheckerService:
             server_config.dict_path,
             False,
             False,
+            None,
         )
         with self._cache_lock:
             self._active_checker = checker
             self._active_key = cache_key
         self._last_load_error = None
 
-    def get_active_checker(self) -> NGramSpellChecker:
+    def get_active_checker(
+        self,
+        personalization: PersonalizationManager | None = None,
+    ) -> NGramSpellChecker:
+        if personalization:
+            server_config = get_server_config()
+            return self.get_checker(
+                config_path=SERVER_CONFIG_PATH,
+                stats_path=server_config.stats_path,
+                dict_path=server_config.dict_path,
+                personalization=personalization,
+            )
         with self._cache_lock:
             checker = self._active_checker
         if checker is None:
@@ -115,6 +141,20 @@ class SpellCheckerService:
         if checker is None:
             raise RuntimeError("Spell checker chưa được khởi tạo.")
         return checker
+
+    def get_personalization(self, passphrase: str) -> PersonalizationManager:
+        cfg = get_server_config()
+        h = hashlib.sha256(passphrase.encode()).hexdigest()[:32]
+        with self._personalization_cache_lock:
+            pm = self._personalization_cache.get(h)
+            if pm is None:
+                pm = PersonalizationManager(
+                    passphrase=passphrase,
+                    data_dir=cfg.personalization_dir,
+                    max_memory_size=cfg.max_personal_memory_size,
+                )
+                self._personalization_cache[h] = pm
+            return pm
 
     def begin_check(self) -> None:
         with self._idle_condition:
@@ -201,11 +241,15 @@ def check_text() -> Any:
         return jsonify({"error": f"Văn bản vượt quá giới hạn {MAX_INPUT_CHARS} ký tự."}), 400
 
     top_k = int(payload.get("top_k", 5))
+    passphrase = str(payload.get("passphrase", "")).strip() or None
 
     start_time = time.perf_counter()
     service.begin_check()
     try:
-        checker = service.get_active_checker()
+        personalization = None
+        if passphrase:
+            personalization = service.get_personalization(passphrase)
+        checker = service.get_active_checker(personalization=personalization)
         suggestions = checker.correct_sentence(text, top_k=top_k)
     except FileNotFoundError as exc:
         return jsonify({"error": str(exc)}), 404
@@ -220,9 +264,69 @@ def check_text() -> Any:
             "top_k": top_k,
             "best_correction": suggestions[0] if suggestions else text,
             "suggestions": suggestions,
+            "personalized": personalization is not None,
             "processing_ms": round((time.perf_counter() - start_time) * 1000, 2),
         }
     )
+
+
+def learn_from_selection() -> Any:
+    if request.method == "OPTIONS":
+        return ("", 204)
+    payload = request.get_json(silent=True) or {}
+    passphrase = str(payload.get("passphrase", "")).strip()
+    if not passphrase:
+        return jsonify({"error": "Thiếu 'passphrase'."}), 400
+    context = payload.get("context")
+    if not isinstance(context, list) or len(context) < 2:
+        return jsonify({"error": "Cần ít nhất 2 phần tử trong 'context'."}), 400
+    pm = service.get_personalization(passphrase)
+    pm.learn_selection(context)
+    return jsonify({"status": "ok"})
+
+
+def learn_from_text() -> Any:
+    if request.method == "OPTIONS":
+        return ("", 204)
+    payload = request.get_json(silent=True) or {}
+    passphrase = str(payload.get("passphrase", "")).strip()
+    if not passphrase:
+        return jsonify({"error": "Thiếu 'passphrase'."}), 400
+    text = str(payload.get("text", "")).strip()
+    if not text:
+        return jsonify({"error": "Thiếu 'text'."}), 400
+    pm = service.get_personalization(passphrase)
+    result = pm.learn_text(text)
+    return jsonify({"status": "ok", **result})
+
+
+def profile() -> Any:
+    if request.method == "OPTIONS":
+        return ("", 204)
+    passphrase = str(request.args.get("passphrase", "")).strip()
+    if not passphrase:
+        return jsonify({"error": "Thiếu 'passphrase'."}), 400
+    pm = service.get_personalization(passphrase)
+    return jsonify(pm.profile)
+
+
+def clear_personalization() -> Any:
+    if request.method == "OPTIONS":
+        return ("", 204)
+    payload = request.get_json(silent=True) or {}
+    passphrase = str(payload.get("passphrase", "")).strip()
+    if not passphrase:
+        return jsonify({"error": "Thiếu 'passphrase'."}), 400
+    pm = service.get_personalization(passphrase)
+    pm.clear_all()
+    h = hashlib.sha256(passphrase.encode()).hexdigest()[:32]
+    with service._personalization_cache_lock:
+        service._personalization_cache.pop(h, None)
+    with service._cache_lock:
+        keys_to_remove = [k for k in service._cache if k[-1] == h]
+        for k in keys_to_remove:
+            service._cache.pop(k, None)
+    return jsonify({"status": "ok"})
 
 
 def export_stats() -> Any:
@@ -317,6 +421,10 @@ def create_app(model_path: str | None = None) -> Flask:
     app.add_url_rule("/api/check", view_func=check_text, methods=["POST", "OPTIONS"])
     app.add_url_rule("/api/build", view_func=build_stats, methods=["POST", "OPTIONS"])
     app.add_url_rule("/api/export", view_func=export_stats, methods=["POST", "OPTIONS"])
+    app.add_url_rule("/api/learn", view_func=learn_from_selection, methods=["POST", "OPTIONS"])
+    app.add_url_rule("/api/learn/text", view_func=learn_from_text, methods=["POST", "OPTIONS"])
+    app.add_url_rule("/api/profile", view_func=profile, methods=["GET", "OPTIONS"])
+    app.add_url_rule("/api/personalization", view_func=clear_personalization, methods=["DELETE", "OPTIONS"])
     try:
         service.preload()
     except Exception:

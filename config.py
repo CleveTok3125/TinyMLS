@@ -36,6 +36,11 @@ class SpellCheckerConfig:
     lambda_2: float = 0.3
     lambda_1: float = 0.1
 
+    max_personal_memory_size: int = 10000
+    priority_score: float = 5.0
+    boost_factor: float = 2.0
+    personalization_dir: str = "data/personalization"
+
     @classmethod
     def from_json(cls, json_path: str) -> "SpellCheckerConfig":
         if os.path.exists(json_path):

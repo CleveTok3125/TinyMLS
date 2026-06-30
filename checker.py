@@ -13,6 +13,7 @@ from rapidfuzz import fuzz, process
 from config import SpellCheckerConfig
 from keyboard import get_keyboard_coordinates, keyboard_matrix
 from model_pkg import ModelArchive
+from personalization import PersonalizationManager
 from telex import to_standard_telex
 
 
@@ -47,10 +48,12 @@ class NGramSpellChecker:
         config: SpellCheckerConfig,
         debug: bool = False,
         detail_log: bool = False,
+        personalization: PersonalizationManager | None = None,
     ) -> None:
         self.cfg = config
         self.debug = debug
         self.detail_log = detail_log
+        self._personalization = personalization
         self._archive: ModelArchive | None = None
 
         if os.path.isdir(self.cfg.stats_path):
@@ -244,7 +247,25 @@ class NGramSpellChecker:
                     if real_word not in candidates:
                         candidates.append(real_word)
 
-        return candidates[: self.cfg.top_n]
+        candidates = candidates[: self.cfg.top_n]
+
+        if self._personalization:
+            err_first = (
+                unicodedata.normalize("NFC", error_word)[0] if error_word else ""
+            )
+            for pw in self._personalization.get_priority_words():
+                pw_norm = unicodedata.normalize("NFC", pw)
+                if pw_norm in candidates:
+                    continue
+                if not pw_norm or pw_norm[0] != err_first:
+                    continue
+                pw_telex = to_standard_telex(pw_norm)
+                if self.is_valid_length(pw_telex, error_len):
+                    if len(candidates) >= self.cfg.top_n:
+                        candidates.pop()
+                    candidates.append(pw_norm)
+
+        return candidates
 
     def get_kb_cost(self, char1: str, char2: str) -> float:
         if char1 == char2:
@@ -370,6 +391,27 @@ class NGramSpellChecker:
 
         score += self.calculate_exact_match_bonus(candidate, error_word)
 
+        if self._personalization:
+            priority_words = self._personalization.get_priority_words()
+            if candidate in priority_words:
+                score += self.cfg.priority_score
+            if prev_word:
+                if self._personalization.has_learned_context(prev_word, candidate):
+                    score += self.cfg.priority_score
+                if prev_prev_word:
+                    bigram_ctx = f"{prev_prev_word} {prev_word}"
+                    if self._personalization.has_learned_context(bigram_ctx, candidate):
+                        score += self.cfg.priority_score
+
+                mem_ctx = [prev_word]
+                if prev_prev_word:
+                    mem_ctx.insert(0, prev_prev_word)
+                count = self._personalization.memory.get_total_boost(
+                    candidate, *mem_ctx
+                )
+                if count > 0:
+                    score += self.cfg.boost_factor * count
+
         if self.debug and self.detail_log:
             prev_str = prev_word if prev_word else "[START]"
             print("ERROR:", err_telex)
@@ -380,6 +422,10 @@ class NGramSpellChecker:
             print(f"         => SCORE: {score:.4f}")
 
         return score
+
+    def learn_selection(self, context: list[str]) -> None:
+        if self._personalization:
+            self._personalization.learn_selection(context)
 
     def calculate_exact_match_bonus(self, candidate: str, error_word: str) -> float:
         if candidate != error_word:

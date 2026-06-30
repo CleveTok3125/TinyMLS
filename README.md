@@ -244,3 +244,264 @@ python model_pkg.py extract model.tinymls -o my_model
 - API giới hạn input `text` tối đa 2000 ký tự cho mỗi request.
 - Builder mặc định chỉ đọc file `.txt` ở thư mục cấp 1. Dùng `recursive=true` để đọc đệ quy vào thư mục con.
 - Builder chấp nhận cả từ tiếng Việt và tiếng Anh (từ chỉ gồm chữ cái) vào vocabulary, giúp model không sửa nhầm từ ngoại lai.
+
+## Cá nhân hóa (Personalization)
+
+Hệ thống hỗ trợ hai cơ chế cá nhân hóa, hoạt động độc lập với model static N-gram:
+
+### 1. Học từ văn bản (Learn from text)
+
+Người dùng gửi một đoạn văn bản tự do (bài báo, tài liệu chuyên ngành, ...). Hệ thống tự động trích xuất:
+
+- **Từ mới**: mỗi từ đều được thêm vào danh sách ưu tiên, được cộng `priority_score` (mặc định 5.0) khi xuất hiện trong candidate
+- **Ngữ cảnh N-gram**: mọi bigram và trigram liền kề đều được ghi nhận, khi context khớp lại cũng được cộng `priority_score`
+
+Không phụ thuộc tần suất — từ chỉ xuất hiện 1 lần vẫn có boost tương đương từ xuất hiện nhiều lần.
+
+Ví dụ: paste câu `"Bệnh nhân được chỉ định uống thuốc kháng sinh"` → hệ thống học:
+- Priority: `bệnh`, `nhân`, `chỉ`, `định`, `uống`, `thuốc`, `kháng`, `sinh`, ...
+- Contexts: `bệnh nhân`, `nhân chỉ`, `chỉ định`, `định uống`, `uống thuốc`, `thuốc kháng`, `kháng sinh`, ...
+- Bigram contexts: `bệnh nhân chỉ`, `nhân chỉ định`, `chỉ định uống`, `định uống thuốc`, `uống thuốc kháng`, `thuốc kháng sinh`, ...
+
+Khi scoring:
+- Từ `thuốc` (trong văn bản) → +`priority_score`
+- Context `uống thuốc` khớp → +`priority_score` nữa (flat, không frequency)
+
+### 2. Bộ nhớ thói quen (Personalization memory)
+
+Lưu lịch sử lựa chọn candidate của người dùng theo context N-gram. Khi người dùng chọn một từ gợi ý (qua `/api/learn`), hệ thống ghi nhận cặp `(context, word)` với mọi cấp độ ngữ cảnh.
+
+Ví dụ context `["đã", "uống", "thuốc"]` tạo 2 entry trong memory:
+- `uống thuốc` (unigram context)
+- `đã uống thuốc` (bigram context)
+
+Khi scoring, mỗi cấp context khớp đều được cộng `boost_factor * count` (mặc định 2.0 * số lần, có trọng số theo tần suất).
+
+Khác với học từ văn bản (flat boost), bộ nhớ thói quen tích luỹ dần theo số lần người dùng chọn candidate.
+
+### Lưu trữ
+
+Dữ liệu được lưu trong `data/personalization/{hash}/` — hash SHA-256 (32 ký tự hex) từ passphrase người dùng.
+
+```
+data/personalization/
+└── {sha256_hash}/
+    ├── memory.json        # Bộ nhớ thói quen (context word → count, có trọng số)
+    ├── learned.json       # Từ và context học từ văn bản (flat, không trọng số)
+    └── ...
+```
+    └── dict/
+        └── {filename}.txt # Từ điển ưu tiên (mỗi dòng một từ)
+```
+
+### Cấu hình (`config.json` / `config.py`)
+
+| Tham số                     | Mặc định | Mô tả                                                |
+| --------------------------- | -------- | ---------------------------------------------------- |
+| `max_personal_memory_size`    | `10000`    | Số lượng cặp `(context, word)` tối đa (LRU eviction) |
+| `priority_score`              | `5.0`      | Điểm cộng cho từ trong từ điển ưu tiên               |
+| `boost_factor`                | `2.0`      | Hệ số nhân cho số lần chọn trong bộ nhớ              |
+| `personalization_dir`         | `"data/personalization"` | Thư mục gốc chứa dữ liệu cá nhân hóa    |
+
+### API
+
+Tất cả endpoint personalization đều yêu cầu `passphrase` — do người dùng tự đặt, dùng để xác định danh tính và thư mục lưu trữ.
+
+#### `POST /api/check` (mở rộng)
+
+Thêm field `passphrase` để kích hoạt cá nhân hóa.
+
+Request body:
+
+- `text` (bắt buộc): chuỗi cần kiểm tra
+- `top_k`: số gợi ý, mặc định `5`
+- `passphrase` (tùy chọn): mật mã người dùng
+
+Ví dụ:
+
+```bash
+curl -X POST http://localhost:8000/api/check \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "uong thuooc",
+    "passphrase": "mysecret"
+  }'
+```
+
+Response bổ sung:
+
+```json
+{
+  "text": "uong thuooc",
+  "personalized": true,
+  "best_correction": "uong thuốc",
+  "suggestions": ["uong thuốc", "ung thư", "uong mau"],
+  "processing_ms": 15.3
+}
+```
+
+#### `POST /api/learn`
+
+Học từ lựa chọn của người dùng. Context là luồng Viterbi đã đi qua (các từ đã được sửa), với từ cuối cùng là từ gợi ý được chọn.
+
+Request body:
+
+- `passphrase` (bắt buộc): mật mã người dùng
+- `context` (bắt buộc): mảng các từ, tối thiểu 2 phần tử
+
+Ví dụ:
+
+```bash
+curl -X POST http://localhost:8000/api/learn \
+  -H "Content-Type: application/json" \
+  -d '{
+    "passphrase": "mysecret",
+    "context": ["uong", "thuốc"]
+  }'
+```
+
+Response:
+
+```json
+{ "status": "ok" }
+```
+
+Học với context dài hơn (N-gram):
+
+```bash
+curl -X POST http://localhost:8000/api/learn \
+  -H "Content-Type: application/json" \
+  -d '{
+    "passphrase": "mysecret",
+    "context": ["đã", "uống", "thuốc"]
+  }'
+```
+
+#### `POST /api/learn/text`
+
+Gửi văn bản tự do để hệ thống học từ mới và ngữ cảnh (không phụ thuộc tần suất — từ xuất hiện 1 lần cũng được boost như nhau).
+
+Request body:
+
+- `passphrase` (bắt buộc)
+- `text` (bắt buộc): văn bản cần học
+
+Ví dụ:
+
+```bash
+curl -X POST http://localhost:8000/api/learn/text \
+  -H "Content-Type: application/json" \
+  -d '{
+    "passphrase": "mysecret",
+    "text": "Bệnh nhân được chỉ định uống thuốc kháng sinh và tái khám sau một tuần"
+  }'
+```
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "words_added": 15,
+  "contexts_added": 27,
+  "total_words": 15
+}
+```
+
+#### `GET /api/profile`
+
+Xem thông tin dữ liệu cá nhân hóa hiện tại.
+
+Query parameter:
+
+- `passphrase` (bắt buộc)
+
+Ví dụ:
+
+```bash
+curl "http://localhost:8000/api/profile?passphrase=mysecret"
+```
+
+Response:
+
+```json
+{
+  "user_hash": "652c7dc687d98c9889304ed2e408c74b",
+  "learned_words": 15,
+  "learned_contexts": 27,
+  "memory_size": 3
+}
+```
+
+#### `DELETE /api/personalization`
+
+Xoá toàn bộ dữ liệu cá nhân hóa (cả từ/text học được lẫn bộ nhớ thói quen).
+
+Request body:
+
+- `passphrase` (bắt buộc)
+
+Ví dụ:
+
+```bash
+curl -X DELETE http://localhost:8000/api/personalization \
+  -H "Content-Type: application/json" \
+  -d '{"passphrase": "mysecret"}'
+```
+
+Response:
+
+```json
+{ "status": "ok" }
+```
+
+### Luồng tích hợp frontend
+
+1. **Học từ văn bản**: Khi người dùng nhập một đoạn văn bản chuyên ngành, gửi đến `/api/learn/text` để hệ thống học từ mới + context
+2. Kiểm tra chính tả với `passphrase` qua `/api/check`
+3. Khi người dùng chọn một gợi ý, gửi context (luồng Viterbi của gợi ý đó) đến `/api/learn`
+
+```js
+// Bước 0: Học từ văn bản (chỉ cần làm 1 lần cho mỗi domain)
+await fetch("http://localhost:8000/api/learn/text", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    passphrase: userPassphrase,
+    text: userDocument,
+  }),
+});
+
+// Bước 1: Kiểm tra chính tả
+const check = await fetch("http://localhost:8000/api/check", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    text: userInput,
+    passphrase: userPassphrase,
+    top_k: 5,
+  }),
+});
+const { suggestions, best_correction } = await check.json();
+
+// Bước 2: Người dùng chọn một gợi ý → học thói quen
+const viterbiPath = selectedSuggestion.split(" ");
+await fetch("http://localhost:8000/api/learn", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    passphrase: userPassphrase,
+    context: viterbiPath,
+  }),
+});
+```
+
+### Học từ văn bản vs Bộ nhớ thói quen
+
+| Đặc tính          | Học từ văn bản (`/api/learn/text`) | Bộ nhớ thói quen (`/api/learn`) |
+| ----------------- | ----------------------------------- | ------------------------------- |
+| Kích hoạt         | Paste văn bản                       | Chọn candidate từ gợi ý         |
+| Tác dụng          | Thêm từ + context vào danh sách ưu tiên | Tăng dần điểm theo số lần chọn  |
+| Trọng số tần suất | Không (flat)                        | Có (tích luỹ dần)               |
+| Điểm cộng         | `priority_score` (5.0) cho từ + mỗi context khớp | `boost_factor * count` (2.0/lần) |
+| Use case          | Học domain mới (y, luật, kỹ thuật)  | Học thói quen sửa lỗi cá nhân   |
