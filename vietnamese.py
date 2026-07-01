@@ -14,6 +14,10 @@ _FINALS = r"(ch|ng|nh|c|m|n|p|t)"
 _SYLLABLE_PATTERN = re.compile(rf"^{_INITIALS}?([{VOWELS}]+){_FINALS}?$")
 _WORD_RE = re.compile(f"[{VIETNAMESE_CHARS}]+")
 
+_MAX_WORD_LEN = 15
+_MAX_SYLLABLE_LEN = 7
+_MAX_VOWEL_PART_LEN = 3
+
 _TONE_MAP = {
     "a": "àáảãạ",
     "ă": "ằắẳẵặ",
@@ -36,31 +40,29 @@ def _toned_variations(base_char: str) -> str:
 
 def is_valid_word(word: str) -> bool:
     word = unicodedata.normalize("NFC", word)
-    return word.isalpha() and 1 <= len(word) <= 15
+    return word.isalpha() and 1 <= len(word) <= _MAX_WORD_LEN
 
 
 def is_valid_vietnamese_syllable(word: str) -> bool:
     word = unicodedata.normalize("NFC", word)
-    if not (1 <= len(word) <= 7):
+    if not (1 <= len(word) <= _MAX_SYLLABLE_LEN):
         return False
-    tone_count = sum(1 for char in word if char in TONED_VOWELS)
-    if tone_count > 1:
+    if sum(1 for c in word if c in TONED_VOWELS) > 1:
         return False
     match = _SYLLABLE_PATTERN.match(word)
     if not match:
         return False
-    initial = match.group(1) or ""
     vowel_part = match.group(2)
-    if len(vowel_part) > 3:
+    if len(vowel_part) > _MAX_VOWEL_PART_LEN:
         return False
-    front_vowel_base = "eêiy"
+    initial = (match.group(1) or "").lower()
     first_v_char = vowel_part[0]
+    front_vowel_base = "eêiy"
     is_front_vowel = any(
         first_v_char in _toned_variations(base) for base in front_vowel_base
     )
-    if initial in {"gh", "ngh", "k"} and not is_front_vowel:
-        return False
-    if initial in {"g", "ng", "c"} and is_front_vowel:
+    if (initial in {"gh", "ngh", "k"} and not is_front_vowel) or \
+       (initial in {"g", "ng", "c"} and is_front_vowel):
         return False
     return True
 
@@ -81,9 +83,9 @@ def extract_sentences_with_words(text: str) -> list[list[str]]:
     for sent in split_sentences(text):
         current_seq: list[str] = []
         for raw in sent.split():
-            raw = raw.lower()
-            if is_valid_word(raw):
-                current_seq.append(raw)
+            word = raw.lower()
+            if is_valid_word(word):
+                current_seq.append(word)
             elif current_seq:
                 result.append(current_seq)
                 current_seq = []

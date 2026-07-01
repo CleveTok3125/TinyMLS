@@ -9,6 +9,9 @@ import marisa_trie
 
 from vietnamese import is_valid_word, split_sentences
 
+_MIN_BIGRAM_LEN = 2
+_MIN_TRIGRAM_LEN = 3
+
 try:
     from tqdm.auto import tqdm
 except ImportError:
@@ -64,10 +67,10 @@ def _update_ngram_counts_from_sequences(
         unigram_counts.update(seq)
         vocab_set.update(seq)
 
-        if len_seq >= 2:
+        if len_seq >= _MIN_BIGRAM_LEN:
             bigram_counts.update(f"{w1} {w2}" for w1, w2 in zip(seq, seq[1:]))
 
-        if len_seq >= 3:
+        if len_seq >= _MIN_TRIGRAM_LEN:
             trigram_counts.update(
                 f"{w1} {w2} {w3}" for w1, w2, w3 in zip(seq, seq[1:], seq[2:])
             )

@@ -17,6 +17,7 @@ CheckerCacheKey = tuple[str, str, str | None, bool, bool, str | None]
 SERVER_CONFIG_PATH = "config.json"
 SERVER_DATA_FOLDER = "data/corpus"
 MAX_INPUT_CHARS = 2000
+_MIN_CONTEXT_LEN = 2
 
 
 class SpellCheckerService:
@@ -52,7 +53,7 @@ class SpellCheckerService:
             config.dict_path = dict_path
         return config
 
-    def get_checker(
+    def get_checker(  # noqa: PLR0913
         self,
         config_path: str,
         stats_path: str | None,
@@ -276,7 +277,7 @@ def learn_from_selection() -> Any:
     if not passphrase:
         return jsonify({"error": "Thiếu 'passphrase'."}), 400
     context = payload.get("context")
-    if not isinstance(context, list) or len(context) < 2:
+    if not isinstance(context, list) or len(context) < _MIN_CONTEXT_LEN:
         return jsonify({"error": "Cần ít nhất 2 phần tử trong 'context'."}), 400
     pm = service.get_personalization(passphrase)
     pm.learn_selection(context)

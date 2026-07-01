@@ -15,6 +15,12 @@ from model_pkg import ModelArchive
 from personalization import PersonalizationManager
 from telex import to_standard_telex
 
+_MIN_ERROR_LEN = 3
+_MAX_LEN_DIFF = 3
+_BONUS_RANGE_LEN = 2
+_MIN_ANCHOR_LEN = 2
+_MIN_CTX_LEN = 2
+
 
 class CasePattern(Enum):
     ALLCASE = "allcase"
@@ -178,9 +184,9 @@ class NGramSpellChecker:
 
     def is_valid_length(self, cand_telex: str, error_len: int) -> bool:
         cand_len = len(cand_telex)
-        if error_len >= 3 and cand_len < 3:
+        if error_len >= _MIN_ERROR_LEN and cand_len < _MIN_ERROR_LEN:
             return False
-        if abs(cand_len - error_len) > 3:
+        if abs(cand_len - error_len) > _MAX_LEN_DIFF:
             return False
         return True
 
@@ -193,7 +199,7 @@ class NGramSpellChecker:
 
         return [r[0] for r in results]
 
-    def get_candidates(
+    def get_candidates(  # noqa: C901, PLR0912
         self, error_word: str, prev_word: str | None = None
     ) -> list[str]:
         candidates: list[str] = []
@@ -236,10 +242,11 @@ class NGramSpellChecker:
 
         if len(candidates) < self.cfg.top_n:
             filtered_global_telex = []
-            min_len = 3 if error_len >= 3 else max(1, error_len - 3)
-            max_len = error_len + 3
-
-            min_len = max(min_len, error_len - 3)
+            min_len = (
+                max(_MIN_ERROR_LEN, error_len - _MAX_LEN_DIFF)
+                if error_len >= _MIN_ERROR_LEN else 1
+            )
+            max_len = error_len + _MAX_LEN_DIFF
 
             for length in range(min_len, max_len + 1):
                 if length in self.telex_by_length:
@@ -431,7 +438,7 @@ class NGramSpellChecker:
             return 0.0
 
         bonus_range = getattr(self.cfg, "exact_match_bonus", [0.0, 0.0])
-        if not isinstance(bonus_range, list) or len(bonus_range) != 2:
+        if not isinstance(bonus_range, list) or len(bonus_range) != _BONUS_RANGE_LEN:
             return 0.0
 
         min_bonus, max_bonus = bonus_range
@@ -444,7 +451,9 @@ class NGramSpellChecker:
     def is_delayed_anchor(self, w: str, next_w: str | None) -> bool:
         if not hasattr(self, "standard_dict") or w not in self.standard_dict:
             return False
-        if len(w) < 2 or w in getattr(self, "dynamic_ambiguous_words", set()):
+        if len(w) < _MIN_ANCHOR_LEN or w in getattr(
+            self, "dynamic_ambiguous_words", set()
+        ):
             return False
         if next_w is None:
             return True
@@ -453,7 +462,7 @@ class NGramSpellChecker:
             return True
         return False
 
-    def correct_sentence(self, sentence: str, top_k: int = 5) -> list[str]:
+    def correct_sentence(self, sentence: str, top_k: int = 5) -> list[str]:  # noqa: C901, PLR0912, PLR0915
         original_words: list[str] = sentence.split()
         case_patterns = [detect_case_pattern(w) for w in original_words]
         words: list[str] = [w.lower() for w in original_words]
@@ -542,7 +551,10 @@ class NGramSpellChecker:
 
                 else:
                     for prev_score, prev_path, prev_cand in paths.values():
-                        prev_prev_cand = prev_path[-2] if len(prev_path) >= 2 else None
+                        prev_prev_cand = (
+                            prev_path[-2] if len(prev_path) >= _MIN_CTX_LEN
+                            else None
+                        )
 
                         step_score = self.calculate_score(
                             curr_cand, current_word, prev_cand, prev_prev_cand

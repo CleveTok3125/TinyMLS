@@ -182,7 +182,7 @@ class PersonalizationManager:
         return boost
 
     def learn_selection(self, context: list[str]) -> None:
-        if len(context) < 2:
+        if len(context) < 2:  # noqa: PLR2004
             return
         selected = context[-1]
         for i in range(len(context) - 2, -1, -1):
