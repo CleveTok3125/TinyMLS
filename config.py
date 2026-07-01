@@ -2,13 +2,12 @@ import dataclasses
 import json
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional
 
 
 @dataclass
 class SpellCheckerConfig:
     stats_path: str = "trained_model"
-    dict_path: Optional[str] = None
+    dict_path: str | None = None
 
     top_n: int = 25
 
@@ -26,7 +25,7 @@ class SpellCheckerConfig:
 
     stutter_penalty: float = 0.01
 
-    exact_match_bonus: List[float] = field(default_factory=lambda: [0.5, 1.5])
+    exact_match_bonus: list[float] = field(default_factory=lambda: [0.5, 1.5])
 
     auto_ambiguous_top_k: int = 20
 
@@ -45,7 +44,7 @@ class SpellCheckerConfig:
     def from_json(cls, json_path: str) -> "SpellCheckerConfig":
         if os.path.exists(json_path):
             try:
-                with open(json_path, "r", encoding="utf-8") as f:
+                with open(json_path, encoding="utf-8") as f:
                     data = json.load(f)
 
                 valid_keys = {f.name for f in dataclasses.fields(cls)}
@@ -53,8 +52,10 @@ class SpellCheckerConfig:
 
                 return cls(**filtered_data)
             except Exception as e:
-                print(
-                    f"Lỗi khi đọc file config {json_path}: {e}. Đang dùng config mặc định."
+                msg = (
+                    f"Lỗi khi đọc file config {json_path}: {e}."
+                    " Đang dùng config mặc định."
                 )
+                print(msg)
 
         return cls()

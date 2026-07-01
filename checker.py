@@ -5,7 +5,6 @@ import unicodedata
 from collections import defaultdict
 from enum import Enum
 from functools import lru_cache
-from typing import Dict, List, Set, Tuple
 
 import marisa_trie
 from rapidfuzz import fuzz, process
@@ -58,7 +57,9 @@ class NGramSpellChecker:
 
         if os.path.isdir(self.cfg.stats_path):
             self._load_from_dir()
-        elif self.cfg.stats_path.endswith(".tinymls") or self.cfg.stats_path.endswith(".zip"):
+        elif self.cfg.stats_path.endswith(
+            ".tinymls"
+        ) or self.cfg.stats_path.endswith(".zip"):
             self._load_from_archive()
         else:
             raise FileNotFoundError(f"Không tìm thấy model: {self.cfg.stats_path}")
@@ -69,11 +70,11 @@ class NGramSpellChecker:
         return None
 
     def _load_standard_dict(self, dict_path: str | None) -> None:
-        self.standard_dict: Set[str] = set()
+        self.standard_dict: set[str] = set()
         if not dict_path:
             return
         try:
-            with open(dict_path, "r", encoding="utf-8") as f:
+            with open(dict_path, encoding="utf-8") as f:
                 self.standard_dict = {
                     line.strip().lower() for line in f if line.strip()
                 }
@@ -85,7 +86,8 @@ class NGramSpellChecker:
         stats_dir = self.cfg.stats_path
         print(f"Loading dữ liệu thống kê từ thư mục: {stats_dir}...")
 
-        with open(os.path.join(stats_dir, "language_stats_meta.json"), encoding="utf-8") as f:
+        meta_path = os.path.join(stats_dir, "language_stats_meta.json")
+        with open(meta_path, encoding="utf-8") as f:
             meta = json.load(f)
 
         vocab_list = [unicodedata.normalize("NFC", w) for w in meta["vocab"]]
@@ -98,7 +100,10 @@ class NGramSpellChecker:
             os.path.join(stats_dir, "bigrams.trie")
         )
         tri_path = os.path.join(stats_dir, "trigrams.trie")
-        self.trigrams = marisa_trie.RecordTrie("<I").mmap(tri_path) if os.path.exists(tri_path) else None
+        self.trigrams = (
+            marisa_trie.RecordTrie("<I").mmap(tri_path)
+            if os.path.exists(tri_path) else None
+        )
 
         self._init_from_vocab(vocab_list)
         self._load_standard_dict(self._resolve_dict_path())
@@ -113,7 +118,10 @@ class NGramSpellChecker:
 
         self.unigrams = self._archive.mmap_trie("unigrams.trie")
         self.bigrams = self._archive.mmap_trie("bigrams.trie")
-        self.trigrams = self._archive.mmap_trie("trigrams.trie") if self._archive.has("trigrams.trie") else None
+        self.trigrams = (
+            self._archive.mmap_trie("trigrams.trie")
+            if self._archive.has("trigrams.trie") else None
+        )
 
         self._init_from_vocab(vocab_list)
 
@@ -128,9 +136,9 @@ class NGramSpellChecker:
             self._archive = None
 
     def _init_from_vocab(self, vocab_list: list[str]) -> None:
-        vocab: Set[str] = set(vocab_list)
+        vocab: set[str] = set(vocab_list)
 
-        self.telex_to_vocab: Dict[str, List[str]] = {}
+        self.telex_to_vocab: dict[str, list[str]] = {}
         for w in vocab_list:
             t = to_standard_telex(w)
             if t not in self.telex_to_vocab:
@@ -145,17 +153,19 @@ class NGramSpellChecker:
         sorted_unigrams = sorted(
             self.unigrams.items(), key=lambda item: item[1], reverse=True
         )
-        self.unigram_rankings: Dict[str, int] = {
+        self.unigram_rankings: dict[str, int] = {
             word: rank for rank, (word, _) in enumerate(sorted_unigrams, start=1)
         }
         self.total_ranked_unigrams = len(sorted_unigrams)
         top_k = getattr(self.cfg, "auto_ambiguous_top_k", 50)
-        self.dynamic_ambiguous_words: Set[str] = {
+        self.dynamic_ambiguous_words: set[str] = {
             word for word, _ in sorted_unigrams[:top_k]
         }
         if self.debug:
+            n_ambig = len(self.dynamic_ambiguous_words)
+            top10 = list(self.dynamic_ambiguous_words)[:10]
             print(
-                f"Tự động cấm Anchor {len(self.dynamic_ambiguous_words)} từ phổ biến: {list(self.dynamic_ambiguous_words)[:10]}..."
+                f"Tự động cấm Anchor {n_ambig} từ phổ biến: {top10}..."
             )
 
         self.kb_coords = get_keyboard_coordinates(keyboard_matrix=keyboard_matrix)
@@ -175,8 +185,8 @@ class NGramSpellChecker:
         return True
 
     def get_fast_close_matches(
-        self, target: str, possibilities: List[str], n: int, cutoff: float
-    ) -> List[str]:
+        self, target: str, possibilities: list[str], n: int, cutoff: float
+    ) -> list[str]:
         results = process.extract(
             target, possibilities, scorer=fuzz.ratio, limit=n, score_cutoff=cutoff * 100
         )
@@ -185,20 +195,20 @@ class NGramSpellChecker:
 
     def get_candidates(
         self, error_word: str, prev_word: str | None = None
-    ) -> List[str]:
-        candidates: List[str] = []
+    ) -> list[str]:
+        candidates: list[str] = []
 
         error_telex = to_standard_telex(error_word)
         error_len = len(error_telex)
 
         if prev_word:
             prefix = f"{prev_word} "
-            context_words: List[str] = [
+            context_words: list[str] = [
                 key[len(prefix) :] for key in self.bigrams.keys(prefix)
             ]
 
             if context_words:
-                context_telex_to_word: Dict[str, List[str]] = {}
+                context_telex_to_word: dict[str, list[str]] = {}
                 for cw in context_words:
                     ct = to_standard_telex(cw)
                     if ct not in context_telex_to_word:
@@ -211,7 +221,7 @@ class NGramSpellChecker:
                     if self.is_valid_length(t, error_len)
                 ]
 
-                context_telex_matches: List[str] = self.get_fast_close_matches(
+                context_telex_matches: list[str] = self.get_fast_close_matches(
                     error_telex,
                     context_telex_list,
                     n=self.cfg.top_n,
@@ -219,10 +229,10 @@ class NGramSpellChecker:
                 )
 
                 for ctm in context_telex_matches:
-                    for real_word in context_telex_to_word[ctm]:
-                        real_word = unicodedata.normalize("NFC", real_word)
-                        if real_word not in candidates:
-                            candidates.append(real_word)
+                    for raw_word in context_telex_to_word[ctm]:
+                        rw = unicodedata.normalize("NFC", raw_word)
+                        if rw not in candidates:
+                            candidates.append(rw)
 
         if len(candidates) < self.cfg.top_n:
             filtered_global_telex = []
@@ -235,17 +245,17 @@ class NGramSpellChecker:
                 if length in self.telex_by_length:
                     filtered_global_telex.extend(self.telex_by_length[length])
 
-            general_telex_matches: List[str] = self.get_fast_close_matches(
+            general_telex_matches: list[str] = self.get_fast_close_matches(
                 error_telex,
                 filtered_global_telex,
                 n=self.cfg.top_n,
                 cutoff=self.cfg.cutoff,
             )
             for gtm in general_telex_matches:
-                for real_word in self.telex_to_vocab[gtm]:
-                    real_word = unicodedata.normalize("NFC", real_word)
-                    if real_word not in candidates:
-                        candidates.append(real_word)
+                for raw_word in self.telex_to_vocab[gtm]:
+                    rw = unicodedata.normalize("NFC", raw_word)
+                    if rw not in candidates:
+                        candidates.append(rw)
 
         candidates = candidates[: self.cfg.top_n]
 
@@ -392,7 +402,10 @@ class NGramSpellChecker:
         score += self.calculate_exact_match_bonus(candidate, error_word)
 
         if self._personalization:
-            score += self._personalization.compute_boost(candidate, prev_word, prev_prev_word)
+            boost = self._personalization.compute_boost(
+                candidate, prev_word, prev_prev_word
+            )
+            score += boost
 
         if self.debug and self.detail_log:
             prev_str = prev_word if prev_word else "[START]"
@@ -440,19 +453,19 @@ class NGramSpellChecker:
             return True
         return False
 
-    def correct_sentence(self, sentence: str, top_k: int = 5) -> List[str]:
-        original_words: List[str] = sentence.split()
+    def correct_sentence(self, sentence: str, top_k: int = 5) -> list[str]:
+        original_words: list[str] = sentence.split()
         case_patterns = [detect_case_pattern(w) for w in original_words]
-        words: List[str] = [w.lower() for w in original_words]
+        words: list[str] = [w.lower() for w in original_words]
         if not words:
             return []
 
-        paths: Dict[str, Tuple[float, List[str], str]] = {}
+        paths: dict[str, tuple[float, list[str], str]] = {}
 
         reset_context_next_step = True
 
         for i, current_word in enumerate(words):
-            new_paths: Dict[str, Tuple[float, List[str], str]] = {}
+            new_paths: dict[str, tuple[float, list[str], str]] = {}
             is_garbage = False
 
             if self.debug:
@@ -487,13 +500,15 @@ class NGramSpellChecker:
                         candidates = [current_word]
                         is_garbage = True
                         if self.debug:
+                            cutoff = self.cfg.cutoff
                             print(
-                                f"  ➜ Bỏ cuộc: Rác/Từ lạ (Không có từ nào >= {self.cfg.cutoff})."
+                                "  ➜ Bỏ cuộc: Rác/Từ lạ"
+                                f" (Không có từ nào >= {cutoff})."
                             )
                 else:
                     candidates = [current_word]
 
-            step_log_data: List[Dict] = []
+            step_log_data: list[dict] = []
 
             for curr_cand in candidates:
                 if reset_context_next_step or not paths:
@@ -544,7 +559,10 @@ class NGramSpellChecker:
                                 {
                                     "cand": curr_cand,
                                     "path": f"{prev_cand} -> {curr_cand}",
-                                    "calc_str": f"({prev_score:.4f} + {step_score:.4f})",
+                                    "calc_str": (
+                                        f"({prev_score:.4f}"
+                                        f" + {step_score:.4f})"
+                                    ),
                                     "score": total_score,
                                 }
                             )
@@ -566,14 +584,20 @@ class NGramSpellChecker:
                 step_log_data.sort(key=lambda x: x["score"], reverse=True)
 
                 print("-" * 82)
-                print(
-                    f"| {'ỨNG VIÊN':<12} | {'TUYẾN TỐT NHẤT':<20} | {'LỊCH SỬ + ĐIỂM BƯỚC NHẢY':<25} | {'TỔNG ĐIỂM':<12} |"
+                header = (
+                    f"| {'ỨNG VIÊN':<12} | {'TUYẾN TỐT NHẤT':<20}"
+                    f" | {'LỊCH SỬ + ĐIỂM BƯỚC NHẢY':<25}"
+                    f" | {'TỔNG ĐIỂM':<12} |"
                 )
+                print(header)
                 print("-" * 82)
                 for item in step_log_data[:20]:
-                    print(
-                        f"| {item['cand']:<12} | {item['path']:<20} | {item['calc_str']:<25} | {item['score']:<12.4f} |"
+                    row = (
+                        f"| {item['cand']:<12} | {item['path']:<20}"
+                        f" | {item['calc_str']:<25}"
+                        f" | {item['score']:<12.4f} |"
                     )
+                    print(row)
                 print("-" * 82)
 
         if paths:

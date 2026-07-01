@@ -1,8 +1,7 @@
-from typing import Dict, List, Tuple
 
 KeyboardRowItem = str | float
 
-keyboard_matrix: List[List[KeyboardRowItem]] = [
+keyboard_matrix: list[list[KeyboardRowItem]] = [
     ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
     [0.5, "a", "s", "d", "f", "g", "h", "j", "k", "l", 0.5],
     [1.5, "z", "x", "c", "v", "b", "n", "m", 1.5],
@@ -20,8 +19,8 @@ def isfloat(s: str) -> float | None:
     return x
 
 
-def get_keyboard_coordinates(keyboard_matrix) -> Dict[str, Tuple[float, int]]:
-    coords: Dict[str, Tuple[float, int]] = {}
+def get_keyboard_coordinates(keyboard_matrix) -> dict[str, tuple[float, int]]:
+    coords: dict[str, tuple[float, int]] = {}
     for y, row in enumerate(keyboard_matrix):
         x_offset: float = 0.0
         for item in row:

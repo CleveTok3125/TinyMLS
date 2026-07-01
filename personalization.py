@@ -4,7 +4,6 @@ import os
 import shutil
 from collections import OrderedDict
 from threading import Lock
-from typing import Dict, List, Set
 
 from vietnamese import extract_ngrams, extract_sentences_with_words
 
@@ -39,12 +38,12 @@ class PersonalizationMemory:
                     self._data.popitem(last=False)
                 self._data[key] = 1
 
-    def to_dict(self) -> Dict[str, int]:
+    def to_dict(self) -> dict[str, int]:
         with self._lock:
             return dict(self._data)
 
     @classmethod
-    def from_dict(cls, data: Dict[str, int], max_size: int = 10000):
+    def from_dict(cls, data: dict[str, int], max_size: int = 10000):
         mem = cls(max_size=max_size)
         mem._data = OrderedDict(
             sorted(data.items(), key=lambda x: x[1], reverse=True)
@@ -75,8 +74,8 @@ class PersonalizationManager:
         self._priority_score = priority_score
         self._boost_factor = boost_factor
         self._memory = PersonalizationMemory(max_size=max_memory_size)
-        self._learned_words: Set[str] = set()
-        self._learned_contexts: Set[str] = set()
+        self._learned_words: set[str] = set()
+        self._learned_contexts: set[str] = set()
         self._lock = Lock()
 
         os.makedirs(self._base_dir, exist_ok=True)
@@ -99,14 +98,14 @@ class PersonalizationManager:
     def load(self) -> None:
         mem_path = self._memory_path()
         if os.path.exists(mem_path):
-            with open(mem_path, "r", encoding="utf-8") as f:
+            with open(mem_path, encoding="utf-8") as f:
                 data = json.load(f)
             self._memory = PersonalizationMemory.from_dict(
                 data, max_size=self._max_memory_size
             )
         learned_path = self._learned_path()
         if os.path.exists(learned_path):
-            with open(learned_path, "r", encoding="utf-8") as f:
+            with open(learned_path, encoding="utf-8") as f:
                 data = json.load(f)
             self._learned_words = set(data.get("words", []))
             self._learned_contexts = set(data.get("contexts", []))
@@ -152,7 +151,7 @@ class PersonalizationManager:
             "total_words": total_words,
         }
 
-    def get_priority_words(self) -> Set[str]:
+    def get_priority_words(self) -> set[str]:
         return self._learned_words
 
     def compute_boost(
@@ -182,7 +181,7 @@ class PersonalizationManager:
                 boost += self._boost_factor * count
         return boost
 
-    def learn_selection(self, context: List[str]) -> None:
+    def learn_selection(self, context: list[str]) -> None:
         if len(context) < 2:
             return
         selected = context[-1]

@@ -14,7 +14,10 @@ def export_model_package(
     dict_path: str | None = None,
     output_path: str = "model.tinymls",
 ) -> str:
-    components = {"config": False, "unigrams": False, "bigrams": False, "trigrams": False, "meta": False, "dictionary": False}
+    components = {
+        "config": False, "unigrams": False, "bigrams": False,
+        "trigrams": False, "meta": False, "dictionary": False,
+    }
 
     with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
         if os.path.exists(config_path):
@@ -37,7 +40,8 @@ def export_model_package(
             components["dictionary"] = True
 
     included = [k for k, v in components.items() if v]
-    print(f"Exported {len(included)} components ({', '.join(included)}) to {output_path}")
+    comps = ", ".join(included)
+    print(f"Exported {len(included)} components ({comps}) to {output_path}")
     return output_path
 
 
@@ -112,12 +116,24 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
 
     export_parser = sub.add_parser("export", help="Export model to .tinymls package")
-    export_parser.add_argument("--stats", default="trained_model", help="Path to trained model directory")
-    export_parser.add_argument("--config", default="config.json", help="Path to config file")
-    export_parser.add_argument("--dict", default=None, help="Path to dictionary file to include in package")
-    export_parser.add_argument("-o", "--output", default="model.tinymls", help="Output path")
+    export_parser.add_argument(
+        "--stats", default="trained_model",
+        help="Path to trained model directory",
+    )
+    export_parser.add_argument(
+        "--config", default="config.json", help="Path to config file",
+    )
+    export_parser.add_argument(
+        "--dict", default=None,
+        help="Path to dictionary file to include in package",
+    )
+    export_parser.add_argument(
+        "-o", "--output", default="model.tinymls", help="Output path",
+    )
 
-    extract_parser = sub.add_parser("extract", help="Extract .tinymls package to directory")
+    extract_parser = sub.add_parser(
+        "extract", help="Extract .tinymls package to directory",
+    )
     extract_parser.add_argument("package", help="Path to .tinymls package")
     extract_parser.add_argument("-o", "--output", default=None, help="Output directory")
 

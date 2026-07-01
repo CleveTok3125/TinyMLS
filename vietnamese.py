@@ -1,10 +1,13 @@
 import re
 import unicodedata
-from typing import List
 
 VOWELS = "aeiouyàáãạảăắằẵặẳâấầẫậẩèéẽẹẻêếềễệểìíĩịỉòóõọỏôốồỗộổơớờỡợởùúũụủưứừữựửỳýỹỵỷ"
 TONED_VOWELS = "àáãạảắằẵặẳấầẫậẩèéẽẹẻếềễệểìíĩịỉòóõọỏốồỗộổớờỡợởùúũụủứừữựửỳýỹỵỷ"
-VIETNAMESE_CHARS = "a-zA-Zàáảãạâầấẩẫậăằắẳẵặèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ"
+VIETNAMESE_CHARS = (
+    "a-zA-Zàáảãạâầấẩẫậăằắẳẵặèéẻẽẹêềếểễệ"
+    "ìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữự"
+    "ỳýỷỹỵđ"
+)
 
 _INITIALS = r"(ch|gh|gi|kh|ngh|ng|nh|ph|qu|th|tr|b|c|d|đ|g|h|k|l|m|n|p|r|s|t|v|x)"
 _FINALS = r"(ch|ng|nh|c|m|n|p|t)"
@@ -65,32 +68,31 @@ def is_valid_vietnamese_syllable(word: str) -> bool:
 _SENTENCE_SEP_RE = re.compile(r'[.,!?;:()\[\]{}""\'\n\r\t\-]+')
 
 
-def split_sentences(text: str) -> List[str]:
+def split_sentences(text: str) -> list[str]:
     return [s.strip() for s in _SENTENCE_SEP_RE.split(text) if s.strip()]
 
 
-def tokenize_words(text: str) -> List[str]:
+def tokenize_words(text: str) -> list[str]:
     return [m.group().lower() for m in _WORD_RE.finditer(text)]
 
 
-def extract_sentences_with_words(text: str) -> List[List[str]]:
+def extract_sentences_with_words(text: str) -> list[list[str]]:
     result = []
     for sent in split_sentences(text):
-        current_seq: List[str] = []
-        for w in sent.split():
-            w = w.lower()
-            if is_valid_word(w):
-                current_seq.append(w)
-            else:
-                if current_seq:
-                    result.append(current_seq)
-                    current_seq = []
+        current_seq: list[str] = []
+        for raw in sent.split():
+            raw = raw.lower()
+            if is_valid_word(raw):
+                current_seq.append(raw)
+            elif current_seq:
+                result.append(current_seq)
+                current_seq = []
         if current_seq:
             result.append(current_seq)
     return result
 
 
-def extract_ngrams(words: List[str], min_n: int = 1, max_n: int = 3) -> List[str]:
+def extract_ngrams(words: list[str], min_n: int = 1, max_n: int = 3) -> list[str]:
     result = []
     for n in range(min_n, max_n + 1):
         for i in range(len(words) - n + 1):

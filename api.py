@@ -16,7 +16,6 @@ from personalization import PersonalizationManager
 CheckerCacheKey = tuple[str, str, str | None, bool, bool, str | None]
 SERVER_CONFIG_PATH = "config.json"
 SERVER_DATA_FOLDER = "data/corpus"
-SERVER_MODEL_PATH: str | None = None
 MAX_INPUT_CHARS = 2000
 
 
@@ -202,8 +201,9 @@ service = SpellCheckerService()
 
 def get_server_config() -> SpellCheckerConfig:
     config = SpellCheckerConfig.from_json(SERVER_CONFIG_PATH)
-    if SERVER_MODEL_PATH:
-        config.stats_path = SERVER_MODEL_PATH
+    mp = getattr(create_app, 'model_path', None)
+    if mp:
+        config.stats_path = mp
     return config
 
 
@@ -222,12 +222,8 @@ def health() -> Any:
     if request.method == "OPTIONS":
         return ("", 204)
     status = service.status()
-    return jsonify(
-        {
-            "status": "ok" if status["checker_loaded"] and not status["last_load_error"] else "degraded",
-            **status,
-        }
-    )
+    ok = status["checker_loaded"] and not status["last_load_error"]
+    return jsonify({"status": "ok" if ok else "degraded", **status})
 
 
 def check_text() -> Any:
@@ -239,7 +235,8 @@ def check_text() -> Any:
     if not text:
         return jsonify({"error": "Thiếu trường 'text'."}), 400
     if len(text) > MAX_INPUT_CHARS:
-        return jsonify({"error": f"Văn bản vượt quá giới hạn {MAX_INPUT_CHARS} ký tự."}), 400
+        msg = f"Văn bản vượt quá giới hạn {MAX_INPUT_CHARS} ký tự."
+        return jsonify({"error": msg}), 400
 
     top_k = int(payload.get("top_k", 5))
     passphrase = str(payload.get("passphrase", "")).strip() or None
@@ -353,7 +350,8 @@ def export_stats() -> Any:
             "logs": normalize_logs(stdout_buffer.getvalue()),
         })
     except Exception as exc:
-        return jsonify({"error": str(exc), "logs": normalize_logs(stdout_buffer.getvalue())}), 500
+        logs = normalize_logs(stdout_buffer.getvalue())
+        return jsonify({"error": str(exc), "logs": logs}), 500
 
 
 def build_stats() -> Any:
@@ -387,25 +385,14 @@ def build_stats() -> Any:
             }
         )
     except FileNotFoundError as exc:
-        response = (
-            jsonify({"error": str(exc), "logs": normalize_logs(stdout_buffer.getvalue())}),
-            404,
-        )
+        logs = normalize_logs(stdout_buffer.getvalue())
+        response = (jsonify({"error": str(exc), "logs": logs}), 404)
     except ValueError as exc:
-        response = (
-            jsonify({"error": str(exc), "logs": normalize_logs(stdout_buffer.getvalue())}),
-            400,
-        )
+        logs = normalize_logs(stdout_buffer.getvalue())
+        response = (jsonify({"error": str(exc), "logs": logs}), 400)
     except Exception as exc:
-        response = (
-            jsonify(
-                {
-                    "error": f"Lỗi vận hành: {exc}",
-                    "logs": normalize_logs(stdout_buffer.getvalue()),
-                }
-            ),
-            500,
-        )
+        logs = normalize_logs(stdout_buffer.getvalue())
+        response = (jsonify({"error": f"Lỗi vận hành: {exc}", "logs": logs}), 500)
     finally:
         service.end_build()
 
@@ -413,8 +400,7 @@ def build_stats() -> Any:
 
 
 def create_app(model_path: str | None = None) -> Flask:
-    global SERVER_MODEL_PATH
-    SERVER_MODEL_PATH = model_path
+    create_app.model_path = model_path
     app = Flask(__name__)
     app.json.ensure_ascii = False
     app.after_request(add_cors_headers)
@@ -422,10 +408,14 @@ def create_app(model_path: str | None = None) -> Flask:
     app.add_url_rule("/api/check", view_func=check_text, methods=["POST", "OPTIONS"])
     app.add_url_rule("/api/build", view_func=build_stats, methods=["POST", "OPTIONS"])
     app.add_url_rule("/api/export", view_func=export_stats, methods=["POST", "OPTIONS"])
-    app.add_url_rule("/api/learn", view_func=learn_from_selection, methods=["POST", "OPTIONS"])
-    app.add_url_rule("/api/learn/text", view_func=learn_from_text, methods=["POST", "OPTIONS"])
-    app.add_url_rule("/api/profile", view_func=profile, methods=["GET", "OPTIONS"])
-    app.add_url_rule("/api/personalization", view_func=clear_personalization, methods=["DELETE", "OPTIONS"])
+    app.add_url_rule("/api/learn", view_func=learn_from_selection,
+                     methods=["POST", "OPTIONS"])
+    app.add_url_rule("/api/learn/text", view_func=learn_from_text,
+                     methods=["POST", "OPTIONS"])
+    app.add_url_rule("/api/profile", view_func=profile,
+                     methods=["GET", "OPTIONS"])
+    app.add_url_rule("/api/personalization", view_func=clear_personalization,
+                     methods=["DELETE", "OPTIONS"])
     try:
         service.preload()
     except Exception:

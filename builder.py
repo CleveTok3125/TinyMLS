@@ -2,12 +2,12 @@ import json
 import os
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
-from typing import Iterable, Iterator, List, Set
+from collections.abc import Iterable, Iterator
 
 import chardet
 import marisa_trie
 
-from vietnamese import is_valid_word, is_valid_vietnamese_syllable, split_sentences
+from vietnamese import is_valid_word, split_sentences
 
 try:
     from tqdm.auto import tqdm
@@ -15,31 +15,29 @@ except ImportError:
     tqdm = None
 
 
-
-def extract_valid_sequences(raw_text: str) -> List[List[str]]:
+def extract_valid_sequences(raw_text: str) -> list[list[str]]:
     text = raw_text.lower()
-    sequences: List[List[str]] = []
+    sequences: list[list[str]] = []
 
     for sent in split_sentences(text):
-        current_seq: List[str] = []
+        current_seq: list[str] = []
         for w in sent.split():
             if is_valid_word(w):
                 current_seq.append(w)
-            else:
-                if current_seq:
-                    sequences.append(current_seq)
-                    current_seq = []
+            elif current_seq:
+                sequences.append(current_seq)
+                current_seq = []
         if current_seq:
             sequences.append(current_seq)
 
     return sequences
 
 
-def iter_valid_sequences(raw_text: str) -> Iterator[List[str]]:
+def iter_valid_sequences(raw_text: str) -> Iterator[list[str]]:
     text = raw_text.lower()
 
     for sent in split_sentences(text):
-        current_seq: List[str] = []
+        current_seq: list[str] = []
         for w in sent.split():
             if is_valid_word(w):
                 current_seq.append(w)
@@ -51,11 +49,11 @@ def iter_valid_sequences(raw_text: str) -> Iterator[List[str]]:
 
 
 def _update_ngram_counts_from_sequences(
-    sequences: Iterable[List[str]],
+    sequences: Iterable[list[str]],
     unigram_counts: Counter[str],
     bigram_counts: Counter[str],
     trigram_counts: Counter[str],
-    vocab_set: Set[str],
+    vocab_set: set[str],
 ) -> int:
     sequence_count = 0
 
@@ -81,8 +79,8 @@ def _merge_partial_stats(
     unigram_counts: Counter[str],
     bigram_counts: Counter[str],
     trigram_counts: Counter[str],
-    vocab_set: Set[str],
-    partial_stats: tuple[Counter[str], Counter[str], Counter[str], Set[str], int],
+    vocab_set: set[str],
+    partial_stats: tuple[Counter[str], Counter[str], Counter[str], set[str], int],
 ) -> int:
     (
         partial_unigrams,
@@ -104,7 +102,7 @@ def _save_language_stats(
     unigram_counts: Counter[str],
     bigram_counts: Counter[str],
     trigram_counts: Counter[str],
-    vocab_set: Set[str],
+    vocab_set: set[str],
     output_dir: str,
 ) -> None:
     print("Building Marisa Tries...")
@@ -140,13 +138,13 @@ def _save_language_stats(
     print(f"Done! Toàn bộ dữ liệu thống kê đã được lưu tại: {output_dir}/")
 
 
-def _load_external_vocab(vocab_set: Set[str], external_dict_path: str | None) -> None:
+def _load_external_vocab(vocab_set: set[str], external_dict_path: str | None) -> None:
     if not external_dict_path:
         return
 
     print(f"Đang nạp từ điển ngoài: '{external_dict_path}'...")
     try:
-        with open(external_dict_path, "r", encoding="utf-8") as f:
+        with open(external_dict_path, encoding="utf-8") as f:
             for line in f:
                 w = line.strip().lower()
                 if is_valid_word(w):
@@ -182,11 +180,11 @@ def _detect_encoding(file_path: str) -> str:
 def _process_corpus_file(
     file_path: str,
     show_progress: bool = False,
-) -> tuple[Counter[str], Counter[str], Counter[str], Set[str], int]:
+) -> tuple[Counter[str], Counter[str], Counter[str], set[str], int]:
     unigram_counts: Counter[str] = Counter()
     bigram_counts: Counter[str] = Counter()
     trigram_counts: Counter[str] = Counter()
-    vocab_set: Set[str] = set()
+    vocab_set: set[str] = set()
     sequence_count = 0
     progress_bar = None
 
@@ -204,7 +202,7 @@ def _process_corpus_file(
             )
 
         enc = _detect_encoding(file_path)
-        with open(file_path, "r", encoding=enc, errors="replace") as f:
+        with open(file_path, encoding=enc, errors="replace") as f:
             for line in f:
                 sequence_count += _update_ngram_counts_from_sequences(
                     iter_valid_sequences(line),
@@ -255,7 +253,7 @@ def build_language_stats_from_folder(
     unigram_counts: Counter[str] = Counter()
     bigram_counts: Counter[str] = Counter()
     trigram_counts: Counter[str] = Counter()
-    vocab_set: Set[str] = set()
+    vocab_set: set[str] = set()
     sequence_count = 0
 
     file_paths = list(iter_corpus_files(folder_path, recursive=recursive))

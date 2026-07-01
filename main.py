@@ -4,6 +4,11 @@ import os
 from api import create_app, get_server_config
 from model_pkg import export_model_package
 
+try:
+    from waitress import serve
+except ImportError:
+    serve = None
+
 app = create_app()
 
 
@@ -34,13 +39,10 @@ def main() -> None:
         app.run(host=host, port=port, debug=True)
         return
 
-    try:
-        from waitress import serve
-    except ImportError:
+    if serve:
+        serve(app, host=host, port=port)
+    else:
         app.run(host=host, port=port, debug=False)
-        return
-
-    serve(app, host=host, port=port)
 
 
 if __name__ == "__main__":
