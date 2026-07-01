@@ -1,5 +1,4 @@
 import contextlib
-import hashlib
 import io
 import os
 import time
@@ -144,7 +143,7 @@ class SpellCheckerService:
 
     def get_personalization(self, passphrase: str) -> PersonalizationManager:
         cfg = get_server_config()
-        h = hashlib.sha256(passphrase.encode()).hexdigest()[:32]
+        h = PersonalizationManager._passphrase_hash(passphrase)
         with self._personalization_cache_lock:
             pm = self._personalization_cache.get(h)
             if pm is None:
@@ -152,6 +151,8 @@ class SpellCheckerService:
                     passphrase=passphrase,
                     data_dir=cfg.personalization_dir,
                     max_memory_size=cfg.max_personal_memory_size,
+                    priority_score=cfg.priority_score,
+                    boost_factor=cfg.boost_factor,
                 )
                 self._personalization_cache[h] = pm
             return pm
@@ -319,7 +320,7 @@ def clear_personalization() -> Any:
         return jsonify({"error": "Thiếu 'passphrase'."}), 400
     pm = service.get_personalization(passphrase)
     pm.clear_all()
-    h = hashlib.sha256(passphrase.encode()).hexdigest()[:32]
+    h = PersonalizationManager._passphrase_hash(passphrase)
     with service._personalization_cache_lock:
         service._personalization_cache.pop(h, None)
     with service._cache_lock:

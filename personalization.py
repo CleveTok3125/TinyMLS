@@ -1,13 +1,12 @@
 import hashlib
 import json
 import os
-import re
 import shutil
 from collections import OrderedDict
 from threading import Lock
 from typing import Dict, List, Set
 
-_TOKEN_RE = re.compile(r"[a-zA-Zàáảãạâầấẩẫậăằắẳẵặèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ]+")
+from vietnamese import extract_ngrams, extract_sentences_with_words
 
 
 class PersonalizationMemory:
@@ -67,10 +66,14 @@ class PersonalizationManager:
         passphrase: str,
         data_dir: str = "data/personalization",
         max_memory_size: int = 10000,
+        priority_score: float = 5.0,
+        boost_factor: float = 2.0,
     ):
-        self._user_hash = hashlib.sha256(passphrase.encode()).hexdigest()[:32]
+        self._user_hash = self._passphrase_hash(passphrase)
         self._base_dir = os.path.join(data_dir, self._user_hash)
         self._max_memory_size = max_memory_size
+        self._priority_score = priority_score
+        self._boost_factor = boost_factor
         self._memory = PersonalizationMemory(max_size=max_memory_size)
         self._learned_words: Set[str] = set()
         self._learned_contexts: Set[str] = set()
@@ -78,6 +81,10 @@ class PersonalizationManager:
 
         os.makedirs(self._base_dir, exist_ok=True)
         self.load()
+
+    @staticmethod
+    def _passphrase_hash(passphrase: str) -> str:
+        return hashlib.sha256(passphrase.encode()).hexdigest()[:32]
 
     @property
     def memory(self) -> PersonalizationMemory:
@@ -121,41 +128,59 @@ class PersonalizationManager:
                 indent=2,
             )
 
-    @staticmethod
-    def _tokenize(text: str) -> List[str]:
-        return [m.group().lower() for m in _TOKEN_RE.finditer(text)]
-
     def learn_text(self, text: str) -> dict:
-        words = self._tokenize(text)
+        sentences = extract_sentences_with_words(text)
         added_words = 0
         added_contexts = 0
 
-        for w in words:
-            if w not in self._learned_words:
-                self._learned_words.add(w)
-                added_words += 1
+        for words in sentences:
+            for w in words:
+                if w not in self._learned_words:
+                    self._learned_words.add(w)
+                    added_words += 1
 
-        for i in range(len(words) - 1):
-            key = f"{words[i]} {words[i + 1]}"
-            if key not in self._learned_contexts:
-                self._learned_contexts.add(key)
-                added_contexts += 1
+            for key in extract_ngrams(words, 2, 3):
+                if key not in self._learned_contexts:
+                    self._learned_contexts.add(key)
+                    added_contexts += 1
 
-        for i in range(len(words) - 2):
-            key = f"{words[i]} {words[i + 1]} {words[i + 2]}"
-            if key not in self._learned_contexts:
-                self._learned_contexts.add(key)
-                added_contexts += 1
-
+        total_words = sum(len(s) for s in sentences)
         self.save()
-        return {"words_added": added_words, "contexts_added": added_contexts, "total_words": len(words)}
-
-    def has_learned_context(self, context: str, word: str) -> bool:
-        key = f"{context} {word}"
-        return key in self._learned_contexts
+        return {
+            "words_added": added_words,
+            "contexts_added": added_contexts,
+            "total_words": total_words,
+        }
 
     def get_priority_words(self) -> Set[str]:
         return self._learned_words
+
+    def compute_boost(
+        self,
+        candidate: str,
+        prev_word: str | None,
+        prev_prev_word: str | None,
+    ) -> float:
+        boost = 0.0
+        if candidate in self._learned_words:
+            boost += self._priority_score
+        if prev_word:
+            if f"{prev_word} {candidate}" in self._learned_contexts:
+                boost += self._priority_score
+            if prev_prev_word:
+                if (
+                    f"{prev_prev_word} {prev_word} {candidate}"
+                    in self._learned_contexts
+                ):
+                    boost += self._priority_score
+
+            mem_ctx = [prev_word]
+            if prev_prev_word:
+                mem_ctx.insert(0, prev_prev_word)
+            count = self._memory.get_total_boost(candidate, *mem_ctx)
+            if count > 0:
+                boost += self._boost_factor * count
+        return boost
 
     def learn_selection(self, context: List[str]) -> None:
         if len(context) < 2:

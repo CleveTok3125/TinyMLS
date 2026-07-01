@@ -1,7 +1,5 @@
 import json
 import os
-import re
-import unicodedata
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from typing import Iterable, Iterator, List, Set
@@ -9,131 +7,47 @@ from typing import Iterable, Iterator, List, Set
 import chardet
 import marisa_trie
 
+from vietnamese import is_valid_word, is_valid_vietnamese_syllable, split_sentences
+
 try:
     from tqdm.auto import tqdm
 except ImportError:
     tqdm = None
 
-VOWELS = "aeiouyàáãạảăắằẵặẳâấầẫậẩèéẽẹẻêếềễệểìíĩịỉòóõọỏôốồỗộổơớờỡợởùúũụủưứừữựửỳýỹỵỷ"
-
-TONED_VOWELS = "àáãạảắằẵặẳấầẫậẩèéẽẹẻếềễệểìíĩịỉòóõọỏốồỗộổớờỡợởùúũụủứừữựửỳýỹỵỷ"
-
-INITIALS = r"(ch|gh|gi|kh|ngh|ng|nh|ph|qu|th|tr|b|c|d|đ|g|h|k|l|m|n|p|r|s|t|v|x)"
-
-FINALS = r"(ch|ng|nh|c|m|n|p|t)"
-
-SYLLABLE_PATTERN = re.compile(rf"^{INITIALS}?([{VOWELS}]+){FINALS}?$")
-
-
-def _get_toned_variations(base_char: str) -> str:
-    variations = {
-        "a": "àáảãạ",
-        "ă": "ằắẳẵặ",
-        "â": "ầấẩẫậ",
-        "e": "èéẻẽẹ",
-        "ê": "ềếểễệ",
-        "i": "ìíỉĩị",
-        "o": "òóỏõọ",
-        "ô": "ồốổỗộ",
-        "ơ": "ờớởỡợ",
-        "u": "ùúủũụ",
-        "ư": "ừứửữự",
-        "y": "ỳýỷỹỵ",
-    }
-    return variations.get(base_char, "")
-
-
-def is_valid_vietnamese_word(word: str) -> bool:
-    word = unicodedata.normalize("NFC", word)
-
-    if not (1 <= len(word) <= 7):
-        return False
-
-    tone_count = sum(1 for char in word if char in TONED_VOWELS)
-    if tone_count > 1:
-        return False
-
-    match = SYLLABLE_PATTERN.match(word)
-    if not match:
-        return False
-
-    initial = match.group(1) or ""
-    vowel_part = match.group(2)
-
-    if len(vowel_part) > 3:
-        return False
-
-    front_vowel_base = "eêiy"
-
-    first_v_char = vowel_part[0]
-    is_front_vowel = any(
-        first_v_char in _get_toned_variations(base) for base in front_vowel_base
-    )
-
-    if initial in ["gh", "ngh", "k"] and not is_front_vowel:
-        return False
-
-    if initial in ["g", "ng", "c"] and is_front_vowel:
-        return False
-
-    return True
-
-
-def is_valid_word(word: str) -> bool:
-    word = unicodedata.normalize("NFC", word)
-    return word.isalpha() and 1 <= len(word) <= 15
 
 
 def extract_valid_sequences(raw_text: str) -> List[List[str]]:
     text = raw_text.lower()
-
-    text = re.sub(r'[.,!?;:()\[\]{}""\'\n\r\t\-]', " | ", text)
-
-    raw_words = text.split()
-
     sequences: List[List[str]] = []
-    current_seq: List[str] = []
 
-    for w in raw_words:
-        if w == "|":
-            if current_seq:
-                sequences.append(current_seq)
-                current_seq = []
-            continue
-
-        if is_valid_word(w):
-            current_seq.append(w)
-        else:
-            if current_seq:
-                sequences.append(current_seq)
-                current_seq = []
-
-    if current_seq:
-        sequences.append(current_seq)
+    for sent in split_sentences(text):
+        current_seq: List[str] = []
+        for w in sent.split():
+            if is_valid_word(w):
+                current_seq.append(w)
+            else:
+                if current_seq:
+                    sequences.append(current_seq)
+                    current_seq = []
+        if current_seq:
+            sequences.append(current_seq)
 
     return sequences
 
 
 def iter_valid_sequences(raw_text: str) -> Iterator[List[str]]:
     text = raw_text.lower()
-    text = re.sub(r'[.,!?;:()\[\]{}""\'\n\r\t\-]', " | ", text)
 
-    current_seq: List[str] = []
-    for w in text.split():
-        if w == "|":
-            if current_seq:
+    for sent in split_sentences(text):
+        current_seq: List[str] = []
+        for w in sent.split():
+            if is_valid_word(w):
+                current_seq.append(w)
+            elif current_seq:
                 yield current_seq
                 current_seq = []
-            continue
-
-        if is_valid_word(w):
-            current_seq.append(w)
-        elif current_seq:
+        if current_seq:
             yield current_seq
-            current_seq = []
-
-    if current_seq:
-        yield current_seq
 
 
 def _update_ngram_counts_from_sequences(

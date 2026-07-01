@@ -392,25 +392,7 @@ class NGramSpellChecker:
         score += self.calculate_exact_match_bonus(candidate, error_word)
 
         if self._personalization:
-            priority_words = self._personalization.get_priority_words()
-            if candidate in priority_words:
-                score += self.cfg.priority_score
-            if prev_word:
-                if self._personalization.has_learned_context(prev_word, candidate):
-                    score += self.cfg.priority_score
-                if prev_prev_word:
-                    bigram_ctx = f"{prev_prev_word} {prev_word}"
-                    if self._personalization.has_learned_context(bigram_ctx, candidate):
-                        score += self.cfg.priority_score
-
-                mem_ctx = [prev_word]
-                if prev_prev_word:
-                    mem_ctx.insert(0, prev_prev_word)
-                count = self._personalization.memory.get_total_boost(
-                    candidate, *mem_ctx
-                )
-                if count > 0:
-                    score += self.cfg.boost_factor * count
+            score += self._personalization.compute_boost(candidate, prev_word, prev_prev_word)
 
         if self.debug and self.detail_log:
             prev_str = prev_word if prev_word else "[START]"
