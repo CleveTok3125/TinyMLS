@@ -35,6 +35,11 @@ Chế độ chạy:
 
 ```
 TinyMLS/
+├── .github/workflows/  # CI pipeline (GitHub Actions)
+│   └── test.yml
+├── tests/              # Black-box API test suite (pytest)
+│   ├── conftest.py     # Fixtures: mini model build từ embedded corpus
+│   └── test_api.py     # 32 tests qua Flask test client
 ├── data/               # Dữ liệu (corpus + dictionary)
 │   ├── corpus/         # Dữ liệu văn bản thô (.txt) để train
 │   └── wordlist.dic    # Từ điển tiếng Việt chuẩn
@@ -49,6 +54,25 @@ TinyMLS/
 ├── api.py              # Flask REST API
 └── main.py             # Entry point
 ```
+
+## Kiểm thử
+
+```bash
+# Cài pytest
+pip install pytest
+
+# Chạy toàn bộ test suite (32 tests)
+pytest tests/ -v
+
+# Chạy test riêng theo category
+pytest tests/ -k "Category1" -v    # Close match
+pytest tests/ -k "Category2" -v    # Telex
+pytest tests/ -k "Category4" -v    # QWERTY
+pytest tests/ -k "Personalization" -v
+pytest tests/ -k "ErrorHandling" -v
+```
+
+Model test được build từ embedded corpus (11 câu, 33 từ vựng) mỗi lần chạy, không ảnh hưởng đến model chính. Personalization data tự động dọn sau suite.
 
 ## API
 
