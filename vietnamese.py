@@ -61,10 +61,10 @@ def is_valid_vietnamese_syllable(word: str) -> bool:
     is_front_vowel = any(
         first_v_char in _toned_variations(base) for base in front_vowel_base
     )
-    if (initial in {"gh", "ngh", "k"} and not is_front_vowel) or \
-       (initial in {"g", "ng", "c"} and is_front_vowel):
-        return False
-    return True
+    return not (
+        (initial in {"gh", "ngh", "k"} and not is_front_vowel)
+        or (initial in {"g", "ng", "c"} and is_front_vowel)
+    )
 
 
 _SENTENCE_SEP_RE = re.compile(r'[.,!?;:()\[\]{}""\'\n\r\t\-]+')

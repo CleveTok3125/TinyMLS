@@ -52,7 +52,7 @@ class SpellCheckerConfig:
                 filtered_data = {k: v for k, v in data.items() if k in valid_keys}
 
                 return cls(**filtered_data)
-            except Exception as e:
+            except (OSError, ValueError, TypeError, AttributeError) as e:
                 msg = (
                     f"Lỗi khi đọc file config {json_path}: {e}."
                     " Đang dùng config mặc định."

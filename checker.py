@@ -22,6 +22,7 @@ _BONUS_RANGE_LEN = 2
 _MIN_ANCHOR_LEN = 2
 _MIN_CTX_LEN = 2
 _GLOBAL_MATCH_CACHE_SIZE = 20000
+_SIMILARITY_CACHE_SIZE = 100000
 _CONTEXT_INDEX_BUDGET = 250000
 _KEEP_TABLES: dict[tuple[int, int], bytes] = {}
 _EPS = 1e-8
@@ -75,6 +76,9 @@ class NGramSpellChecker:
         self._global_telex_cache: dict[tuple[str, int], tuple[str, ...]] = {}
         self._context_index_cache: OrderedDict[str, tuple[list[str], list[str], bytes]] = OrderedDict()
         self._context_index_size = 0
+        self._similarity_cache = lru_cache(maxsize=_SIMILARITY_CACHE_SIZE)(
+            self._compute_similarity
+        )
 
         # Resolved once: these were read via getattr on every score call.
         self._sim_weight = getattr(self.cfg, "sim_weight", 0.0)
@@ -342,7 +346,7 @@ class NGramSpellChecker:
         self._context_index_cache[prev_word] = entry
         return entry
 
-    def get_candidates(  # noqa: C901, PLR0912
+    def get_candidates(
         self,
         error_word: str,
         prev_word: str | None = None,
@@ -432,8 +436,12 @@ class NGramSpellChecker:
 
         return min(dist / self.cfg.max_kb_distance, 1.0)
 
-    @lru_cache(maxsize=100000)
     def keyboard_aware_similarity(self, word1: str, word2: str) -> float:
+        # Per-instance cache: lru_cache on a method would keep every checker
+        # ever built alive through the self in its key.
+        return self._similarity_cache(word1, word2)
+
+    def _compute_similarity(self, word1: str, word2: str) -> float:
         m, n = len(word1), len(word2)
         dp = [[0.0] * (n + 1) for _ in range(m + 1)]
 
@@ -645,16 +653,14 @@ class NGramSpellChecker:
         if next_w is None:
             return True
 
-        if f"{w} {next_w}" in self.bigrams:
-            return True
-        return False
+        return f"{w} {next_w}" in self.bigrams
 
     def correct_sentence(
         self,
         sentence: str,
         top_k: int = 5,
         personalization: PersonalizationManager | None = None,
-    ) -> list[str]:  # noqa: C901, PLR0912, PLR0915
+    ) -> list[str]:
         original_words: list[str] = sentence.split()
         case_patterns = [detect_case_pattern(w) for w in original_words]
         words: list[str] = [w.lower() for w in original_words]

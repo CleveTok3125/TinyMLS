@@ -1,8 +1,9 @@
 import json
 import os
 from collections import Counter
-from concurrent.futures import ProcessPoolExecutor
 from collections.abc import Iterable, Iterator
+from concurrent.futures import ProcessPoolExecutor
+from itertools import pairwise
 
 import chardet
 import marisa_trie
@@ -69,7 +70,7 @@ def _update_ngram_counts_from_sequences(
         vocab_set.update(seq)
 
         if len_seq >= _MIN_BIGRAM_LEN:
-            bigram_counts.update(f"{w1} {w2}" for w1, w2 in zip(seq, seq[1:]))
+            bigram_counts.update(f"{w1} {w2}" for w1, w2 in pairwise(seq))
 
         if len_seq >= _MIN_TRIGRAM_LEN:
             trigram_counts.update(
