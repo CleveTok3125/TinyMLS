@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import os
 import socket
 import sys
@@ -45,9 +46,31 @@ def model_dir(corpus_dir, tmp_path_factory):
     return str(output_dir)
 
 
-CONFIG_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json"
-)
+@pytest.fixture(scope="session")
+def test_config(tmp_path_factory):
+    """A config file owned by the suite.
+
+    config.json is gitignored, so a fresh checkout falls back to the dataclass
+    defaults. Pinning the values keeps assertions independent of whether the
+    working directory happens to carry a config file.
+    """
+    path = tmp_path_factory.mktemp("config") / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "top_n": 25,
+                "cutoff": 0.1,
+                "sim_weight": 1,
+                "context_weight": 1.0,
+                "beam_width": 5,
+                "lambda_3": 0.6,
+                "lambda_2": 0.3,
+                "lambda_1": 0.1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return str(path)
 
 
 @pytest.fixture(scope="session")
@@ -56,19 +79,15 @@ def socket_path(tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
-def service(model_dir, tmp_path_factory):
-    """Server service with isolated model, data dir and config.
-
-    The config path is pinned so results do not shift with whatever
-    config.json the developer happens to have in XDG_CONFIG_HOME.
-    """
+def service(model_dir, tmp_path_factory, test_config):
+    """Server service with an isolated model, data dir and config."""
     from service import SpellCheckerService
 
     data_root = tmp_path_factory.mktemp("xdg-data")
     svc = SpellCheckerService(
         model_path=model_dir,
         data_dir=str(data_root),
-        config_path=str(CONFIG_PATH),
+        config_path=test_config,
     )
     svc.preload()
     return svc
