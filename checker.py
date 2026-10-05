@@ -397,11 +397,10 @@ class NGramSpellChecker:
                 unicodedata.normalize("NFC", error_word)[0] if error_word else ""
             )
             low_len, high_len = self.allowed_length_window(error_len)
-            for pw in self._personalization.get_priority_words():
-                pw_norm = unicodedata.normalize("NFC", pw)
+            # Only learned words sharing the token's first character can ever be
+            # accepted below, so ask for that slice instead of every learned word.
+            for pw_norm in self._personalization.get_priority_words(err_first):
                 if pw_norm in candidates:
-                    continue
-                if not pw_norm or pw_norm[0] != err_first:
                     continue
                 pw_len = len(to_standard_telex(pw_norm))
                 if low_len <= pw_len <= high_len:

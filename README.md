@@ -10,26 +10,145 @@ Yêu cầu cài dependency trong `requirements.txt`.
 # Dùng thư mục trained_model/ (mặc định)
 python main.py
 
-# Dùng file .tinymls (tự động, không cần config riêng)
+# Dùng file .tinymls
 python main.py model.tinymls
+
+# Chỉ định socket khác
+python main.py --socket /tmp/tinymls.sock
 ```
 
-Biến môi trường hỗ trợ:
+Socket đặt ở `$XDG_RUNTIME_DIR/tinymls.sock` — đúng theo XDG Base Directory
+Specification, nơi dành cho socket và file chỉ sống trong phiên đăng nhập. Trên
+hệ thống dùng systemd, `XDG_RUNTIME_DIR` là `/run/user/$UID`.
 
-- `HOST`: mặc định `0.0.0.0`
-- `PORT`: mặc định `8000`
-- `DEBUG`: nhận `1`, `true`, `yes` để bật debug
-
-Ví dụ:
+Nếu biến này không được đặt thì server báo lỗi rõ ràng và **không tự chọn chỗ
+thay thế**, vì mọi vị trí khác đều không phải chuẩn. Đặt biến, hoặc truyền
+`--socket` / `TINYMLS_SOCKET`:
 
 ```bash
-HOST=127.0.0.1 PORT=8000 python main.py model.tinymls
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+python main.py
 ```
 
-Chế độ chạy:
+Server nạp model trước khi lắng nghe, nên lần request đầu không phải chờ nạp.
+Socket được đặt quyền `0600`: chỉ cùng user mới kết nối được.
 
-- `DEBUG=true`: dùng Flask dev server
-- mặc định: ưu tiên `waitress` để chạy ổn định lâu dài trên máy
+Dừng server bằng `SIGINT` hoặc `SIGTERM`; socket file sẽ được xoá khi thoát.
+
+## Giao thức
+
+Mỗi frame gồm **4 byte độ dài big-endian**, theo sau là **msgpack map**.
+Một request, một response, giữ nguyên thứ tự trên một connection đã mở, nên model
+được giữ nóng suốt phiên làm việc.
+
+Ký tự báo độ dài thay vì ký tự xuống dòng, vì một bản sửa có thể chứa bất kỳ ký tự
+nào và payload vốn đã là nhị phân.
+
+Request:
+
+```json
+{"op": "check", "text": "toi dang go tieng viet", "top_k": 5, "personalized": false}
+```
+
+Response:
+
+```json
+{"ok": true, "op": "check", "text": "toi dang go tieng viet", "top_k": 5,
+ "best_correction": "toi đang gõ tiếng việt",
+ "suggestions": ["toi đang gõ tiếng việt"],
+ "personalized": false, "processing_ms": 9.42}
+```
+
+Khi lỗi: `{"ok": false, "error": "..."}`.
+
+Frame dài hơn 1 MiB bị từ chối. Lỗi ở tầng framing đóng connection vì không còn
+đồng bộ được luồng; lỗi của một request cụ thể chỉ trả về `ok: false` và giữ
+connection.
+
+### Operations
+
+| `op`         | Trường             | Trả về                                                       |
+| ------------ | ------------------ | ------------------------------------------------------------ |
+| `ping`       | —                  | `status`                                                     |
+| `check`      | `text`             | `best_correction`, `suggestions`, `personalized`, `processing_ms` |
+| `learn`      | `context`          | `status`                                                     |
+| `learn_text` | `text`             | `words_added`, `contexts_added`, `total_words`               |
+| `profile`    | —                  | `learned_words`, `learned_contexts`, `memory_size`              |
+| `clear`      | —                  | `status`                                                     |
+
+`check` nhận `personalized: true` để dùng từ và thói quen đã học. Mặc định là
+không, để lời gọi thường không phải nạp thêm bộ nhớ.
+
+`text` tối đa 2000 ký tự. `context` cần ít nhất 2 phần tử. `top_k` mặc định 5.
+
+## Client CLI
+
+```bash
+python cli.py ping
+python cli.py check "toi dang go tieng viet"
+python cli.py check "uong thuoc" --personalized --top-k 3
+python cli.py learn-text "$(cat tai-lieu.txt)"
+python cli.py learn "đã uống thuốc"
+python cli.py profile
+python cli.py clear
+```
+
+Thêm `--json` để lấy phản hồi nguyên bản từ server. Cờ `--socket` nhận được ở
+trước hoặc sau subcommand.
+
+```bash
+python cli.py check "toi dang go"
+python cli.py check "toi dang go" --json
+```
+
+Mã thoát: `0` thành công, `1` server báo lỗi, `2` không kết nối được socket.
+
+## Client thư viện
+
+```python
+from client import SpellCheckerClient
+from paths import socket_path
+
+with SpellCheckerClient(socket_path()) as conn:
+    result = conn.check("toi dang go tieng viet", top_k=3)
+    print(result["best_correction"], result["suggestions"])
+
+    conn.learn_text("Bệnh nhân được uống thuốc kháng sinh")
+    print(conn.profile())
+```
+
+`client.py` là bản tham chiếu. Client viết bằng ngôn ngữ khác làm theo
+`protocol.py`: 4 byte độ dài big-endian rồi tới msgpack map.
+
+### Về tương tranh
+
+Mỗi connection một thread, nhưng các lời gọi checker được tuần tự hoá. Việc sửa
+lỗi là tác vụ CPU-bound và bị GIL giới hạn, nên chạy song song chỉ thêm nhiễu
+scheduling mà không tăng throughput.
+
+## Cấu hình
+
+`config.json` được đọc từ `$XDG_CONFIG_HOME/tinymls/config.json` nếu có, nếu không
+thì từ `config.json` trong thư mục đang chạy. File trong XDG được ưu tiên, nên
+cấu hình ở mức người dùng sẽ ghi đè bản đi kèm dự án.
+
+## Build và export
+
+```bash
+# Xây dựng lại thống kê N-gram từ corpus
+python main.py --build
+python main.py --build --corpus /path/to/corpus --workers 4 --recursive
+
+# Export model thành một file
+python main.py --export model.tinymls
+
+# Công cụ riêng
+python model_pkg.py export --stats trained_model --dict data/wordlist.dic -o model.tinymls
+python model_pkg.py extract model.tinymls -o my_model
+```
+
+Sau `--build` cần khởi động lại server để nạp model mới. Build chạy ở tiến trình
+riêng nên không phối hợp với request đang chờ.
 
 ## Cấu trúc thư mục
 
@@ -37,12 +156,18 @@ Chế độ chạy:
 TinyMLS/
 ├── .github/workflows/  # CI pipeline (GitHub Actions)
 │   └── test.yml
-├── tests/              # Black-box API test suite (pytest)
-│   ├── conftest.py     # Fixtures: mini model build từ embedded corpus
-│   └── test_api.py     # 32 tests qua Flask test client
+├── tests/              # Test suite (pytest)
+│   ├── conftest.py     # Fixtures: mini model + server trên socket tạm
+│   ├── test_protocol.py# Framing, round trip, lỗi, thao tác
+│   └── test_cli.py     # Parsing, output, mã thoát
 ├── data/               # Dữ liệu (corpus + dictionary)
 │   ├── corpus/         # Dữ liệu văn bản thô (.txt) để train
 │   └── wordlist.dic    # Từ điển tiếng Việt chuẩn
+├── protocol.py         # Định nghĩa wire format
+├── server.py           # Unix socket server
+├── service.py          # Nghiệp vụ + cache
+├── client.py           # Client tham chiếu
+├── cli.py              # Client dòng lệnh
 ├── builder.py          # Xây dựng N-gram language model từ corpus
 ├── trained_model/      # Model artifacts
 │   ├── unigrams.trie, bigrams.trie, trigrams.trie
@@ -53,228 +178,64 @@ TinyMLS/
 ├── config.py           # SpellCheckerConfig dataclass
 ├── config.json         # Runtime configuration
 ├── keyboard.py         # QWERTY keyboard layout
+├── personalization.py  # Bộ nhớ học được, lưu theo XDG
+├── vietnamese.py       # Chuẩn hoá văn bản tiếng Việt
+├── paths.py            # Đường dẫn theo XDG Base Directory
 ├── telex.py            # Telex encoding conversion
-├── api.py              # Flask REST API
 └── main.py             # Entry point
 ```
 
 ## Kiểm thử
 
 ```bash
-# Cài pytest
 pip install pytest
 
-# Chạy toàn bộ test suite (32 tests)
 pytest tests/ -v
-
-# Chạy test riêng theo category
-pytest tests/ -k "Category1" -v    # Close match
-pytest tests/ -k "Category2" -v    # Telex
-pytest tests/ -k "Category4" -v    # QWERTY
-pytest tests/ -k "Personalization" -v
-pytest tests/ -k "ErrorHandling" -v
 ```
 
-Model test được build từ embedded corpus (11 câu, 33 từ vựng) mỗi lần chạy, không ảnh hưởng đến model chính. Personalization data tự động dọn sau suite.
-
-## API
-
-Server đọc cấu hình từ `config.json`. Frontend không truyền path hay file cấu hình lên API.
-
-Base URL mặc định:
-
-```text
-http://localhost:8000
-```
-
-### `GET /api/health`
-
-Kiểm tra server đang hoạt động.
-
-Ví dụ:
+Bộ test dựng một model nhỏ từ corpus 11 câu nhúng sẵn, chạy server thật trên
+socket tạm rồi gọi qua client. Dữ liệu personalization tự dọn sau suite.
 
 ```bash
-curl http://localhost:8000/api/health
-```
-
-Response:
-
-```json
-{
-  "status": "ok",
-  "checker_loaded": true,
-  "build_in_progress": false,
-  "active_requests": 0,
-  "last_load_error": null
-}
-```
-
-### `POST /api/check`
-
-Nhận văn bản đầu vào và trả về các gợi ý sửa lỗi.
-
-Request body:
-
-- `text`: chuỗi cần kiểm tra, bắt buộc
-- `top_k`: số gợi ý cần trả về, mặc định `5`
-
-Các path cấu hình (`stats_path`, `dict_path`) được lấy từ `config.json`/`config.py` phía server, frontend không truyền lên.
-
-Ví dụ:
-
-```bash
-curl -X POST http://localhost:8000/api/check \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "toi dang go tieng viet",
-    "top_k": 3
-  }'
-```
-
-Response thành công:
-
-```json
-{
-  "text": "toi dang go tieng viet",
-  "top_k": 3,
-  "best_correction": "toi đang gõ tiếng việt",
-  "processing_ms": 12.4,
-  "suggestions": [
-    "toi đang gõ tiếng việt",
-    "tôi đang gõ tiếng việt",
-    "toi đang go tiếng việt"
-  ]
-}
-```
-
-Response lỗi:
-
-```json
-{
-  "error": "Thiếu trường 'text'."
-}
-```
-
-### `POST /api/build`
-
-Build lại bộ thống kê ngôn ngữ từ corpus.
-
-Request body:
-
-- `workers`: số worker xử lý, mặc định `1`
-- `recursive`: `true` nếu muốn đọc đệ quy file `.txt` từ thư mục con, mặc định `false`
-
-`data/corpus/` là thư mục input cố định phía server. Các đường dẫn lấy từ `config.json` hoặc dùng mặc định trong `config.py`.
-
-Ví dụ:
-
-```bash
-curl -X POST http://localhost:8000/api/build \
-  -H "Content-Type: application/json" \
-  -d '{
-    "workers": 4,
-    "recursive": true
-  }'
-```
-
-Response thành công:
-
-```json
-{
-  "message": "Xây dựng thống kê hoàn tất.",
-  "logs": "..."
-}
-```
-
-## Tích hợp frontend
-
-Frontend chỉ cần gọi HTTP JSON:
-
-```js
-const response = await fetch("http://localhost:8000/api/check", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({
-    text: userInput,
-    top_k: 5,
-  }),
-});
-
-const data = await response.json();
-```
-
-Server đã bật CORS `*`, nên có thể gọi trực tiếp từ frontend chạy domain khác trong môi trường phát triển.
-
-### `POST /api/export`
-
-Export model thành file `.tinymls` duy nhất. Các thành phần trong file không cố định — chỉ gồm những gì tồn tại trong thư mục stats (vd: bỏ qua `trigrams.trie` nếu không có). Riêng `vocab.txt` là bắt buộc: export sẽ báo lỗi nếu thư mục model thiếu file này.
-
-Request body:
-
-- `output`: đường dẫn file đầu ra, mặc định `model.tinymls`
-
-Ví dụ:
-
-```bash
-curl -X POST http://localhost:8000/api/export \
-  -H "Content-Type: application/json" \
-  -d '{"output": "my_model.tinymls"}'
+pytest tests/ -k protocol -v   # framing và round trip
+pytest tests/ -k cli -v         # dòng lệnh
 ```
 
 ## Model packages (`.tinymls`)
 
-File `.tinymls` là zip chứa toàn bộ model thành 1 file duy nhất.
-
-### Sử dụng
+File `.tinymls` là zip chứa toàn bộ model thành một file.
 
 ```python
 from config import SpellCheckerConfig
 from checker import NGramSpellChecker
 
-# Load trực tiếp từ .tinymls (không giải nén thủ công)
-cfg = SpellCheckerConfig(stats_path='model.tinymls')
+cfg = SpellCheckerConfig(stats_path="model.tinymls")
 checker = NGramSpellChecker(cfg)
-checker.correct_sentence('toi dang go tieng viet')
+checker.correct_sentence("toi dang go tieng viet")
 checker.close()  # dọn temp files
 ```
 
-### `dict_path`
+`dict_path`:
 
 - Mặc định `None` — không tự động tìm file từ điển
 - Nếu load từ `.tinymls` có chứa `dictionary.dic`, checker tự động dùng
 - Nếu chỉ định `dict_path` rõ ràng → ưu tiên dùng file đó
 
 ```python
-# Dùng dictionary.dic trong package (nếu có)
-cfg = SpellCheckerConfig(stats_path='model.tinymls')
-
-# Ghi đè: dùng file riêng
-cfg = SpellCheckerConfig(stats_path='model.tinymls', dict_path='data/wordlist.dic')
-```
-
-## Export model (CLI)
-
-```bash
-# Export to file
-python main.py --export model.tinymls
-
-# Hoặc dùng công cụ riêng
-python model_pkg.py export --stats trained_model --output model.tinymls
-python model_pkg.py export --stats trained_model --dict data/wordlist.dic -o model.tinymls
-python model_pkg.py extract model.tinymls -o my_model
+cfg = SpellCheckerConfig(stats_path="model.tinymls", dict_path="data/wordlist.dic")
 ```
 
 ## Ghi chú vận hành
 
-- Checker được preload khi server khởi động để giảm độ trễ ở request đầu tiên.
-- Trong lúc build thống kê, request check mới sẽ chờ build hoàn tất rồi mới xử lý.
-- API giới hạn input `text` tối đa 2000 ký tự cho mỗi request.
-- Builder mặc định chỉ đọc file `.txt` ở thư mục cấp 1. Dùng `recursive=true` để đọc đệ quy vào thư mục con.
+- Model được nạp trước khi server lắng nghe.
+- Server chỉ phục vụ tiến trình cùng user trên cùng máy.
+- Lần `check` đầu tiên với `personalized: true` sẽ dựng thêm một checker: đo trên model mặc định tốn 0,81 s và 48 MB. Các request sau dùng lại checker đó nên nhanh hơn nhiều.
+- Builder mặc định chỉ đọc file `.txt` ở thư mục cấp 1. Dùng `--recursive` để đọc đệ quy vào thư mục con.
 - Builder chấp nhận cả từ tiếng Việt và tiếng Anh (từ chỉ gồm chữ cái) vào vocabulary, giúp model không sửa nhầm từ ngoại lai.
 - Từ điển nằm ở `vocab.txt` (mỗi dòng một từ, đã sắp xếp), tách riêng khỏi `language_stats_meta.json` vì parse nhanh hơn 2.1× và nhỏ hơn 1.5 MB. Thứ tự từ trong file quyết định thứ tự ứng viên nên phải giữ nguyên khi sửa.
 - Không có `vocab.txt` thì checker báo lỗi rõ ràng; cần build lại model.
 - Checker giữ cache cho từ đứng trước (`_CONTEXT_INDEX_BUDGET` giới hạn theo tổng số từ kế tiếp được cache). Tăng ngân sách thì nhanh hơn nhưng tốn bộ nhớ; đo được 250.000 là mức không còn thrashing, 150.000 bắt đầu chậm lại rõ rệt.
-- Bộ lọc độ dài ứng viên dùng `bytes.translate` trên một byte cho mỗi từ kế tiếp, không cần numpy. Đo cùng dữ liệu thì cách này nhẹ bộ nhớ hơn và không chậm hơn so với mảng `int16` của numpy.
+- Bộ lọc độ dài ứng viên dùng `bytes.translate` trên một byte cho mỗi từ kế tiếp.
 
 ## Cá nhân hóa (Personalization)
 
@@ -290,19 +251,22 @@ Người dùng gửi một đoạn văn bản tự do (bài báo, tài liệu ch
 Không phụ thuộc tần suất — từ chỉ xuất hiện 1 lần vẫn có boost tương đương từ xuất hiện nhiều lần.
 
 Ví dụ: paste câu `"Bệnh nhân được chỉ định uống thuốc kháng sinh"` → hệ thống học:
+
 - Priority: `bệnh`, `nhân`, `chỉ`, `định`, `uống`, `thuốc`, `kháng`, `sinh`, ...
 - Contexts: `bệnh nhân`, `nhân chỉ`, `chỉ định`, `định uống`, `uống thuốc`, `thuốc kháng`, `kháng sinh`, ...
 - Bigram contexts: `bệnh nhân chỉ`, `nhân chỉ định`, `chỉ định uống`, `định uống thuốc`, `uống thuốc kháng`, `thuốc kháng sinh`, ...
 
 Khi scoring:
+
 - Từ `thuốc` (trong văn bản) → +`priority_score`
 - Context `uống thuốc` khớp → +`priority_score` nữa (flat, không frequency)
 
 ### 2. Bộ nhớ thói quen (Personalization memory)
 
-Lưu lịch sử lựa chọn candidate của người dùng theo context N-gram. Khi người dùng chọn một từ gợi ý (qua `/api/learn`), hệ thống ghi nhận cặp `(context, word)` với mọi cấp độ ngữ cảnh.
+Lưu lịch sử lựa chọn candidate của người dùng theo context N-gram. Khi người dùng chọn một từ gợi ý (qua operation `learn`), hệ thống ghi nhận cặp `(context, word)` với mọi cấp độ ngữ cảnh.
 
 Ví dụ context `["đã", "uống", "thuốc"]` tạo 2 entry trong memory:
+
 - `uống thuốc` (unigram context)
 - `đã uống thuốc` (bigram context)
 
@@ -312,17 +276,12 @@ Khác với học từ văn bản (flat boost), bộ nhớ thói quen tích lu�
 
 ### Lưu trữ
 
-Dữ liệu được lưu trong `data/personalization/{hash}/` — hash SHA-256 (32 ký tự hex) từ passphrase người dùng.
+Dữ liệu nằm trong thư mục dữ liệu XDG của user.
 
 ```
-data/personalization/
-└── {sha256_hash}/
-    ├── memory.json        # Bộ nhớ thói quen (context word → count, có trọng số)
-    ├── learned.json       # Từ và context học từ văn bản (flat, không trọng số)
-    └── ...
-```
-    └── dict/
-        └── {filename}.txt # Từ điển ưu tiên (mỗi dòng một từ)
+$XDG_DATA_HOME/tinymls/personalization/     # mặc định ~/.local/share/tinymls/personalization/
+├── memory.json        # Bộ nhớ thói quen (context word → count, có trọng số)
+└── learned.json       # Từ và context học từ văn bản (flat, không trọng số)
 ```
 
 ### Cấu hình (`config.json` / `config.py`)
@@ -332,204 +291,104 @@ data/personalization/
 | `max_personal_memory_size`    | `10000`    | Số lượng cặp `(context, word)` tối đa (LRU eviction) |
 | `priority_score`              | `5.0`      | Điểm cộng cho từ trong từ điển ưu tiên               |
 | `boost_factor`                | `2.0`      | Hệ số nhân cho số lần chọn trong bộ nhớ              |
-| `personalization_dir`         | `"data/personalization"` | Thư mục gốc chứa dữ liệu cá nhân hóa    |
 
-### API
+### Operations
 
-Tất cả endpoint personalization đều yêu cầu `passphrase` — do người dùng tự đặt, dùng để xác định danh tính và thư mục lưu trữ.
+#### `check` (mở rộng)
 
-#### `POST /api/check` (mở rộng)
+Thêm field `personalized` để kích hoạt cá nhân hóa.
 
-Thêm field `passphrase` để kích hoạt cá nhân hóa.
-
-Request body:
-
-- `text` (bắt buộc): chuỗi cần kiểm tra
-- `top_k`: số gợi ý, mặc định `5`
-- `passphrase` (tùy chọn): mật mã người dùng
-
-Ví dụ:
-
-```bash
-curl -X POST http://localhost:8000/api/check \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "uong thuooc",
-    "passphrase": "mysecret"
-  }'
+```python
+conn.check("uong thuooc", personalized=True)
 ```
-
-Response bổ sung:
 
 ```json
-{
-  "text": "uong thuooc",
-  "personalized": true,
-  "best_correction": "uong thuốc",
-  "suggestions": ["uong thuốc", "ung thư", "uong mau"],
-  "processing_ms": 15.3
-}
+{"ok": true, "op": "check", "text": "uong thuooc", "top_k": 5,
+ "best_correction": "uong thuốc",
+ "suggestions": ["uong thuốc"], "personalized": true, "processing_ms": 12.4}
 ```
 
-#### `POST /api/learn`
+#### `learn_text`
 
-Học từ lựa chọn của người dùng. Context là luồng Viterbi đã đi qua (các từ đã được sửa), với từ cuối cùng là từ gợi ý được chọn.
+Học từ văn bản tự do: thêm từ mới và context. Không phụ thuộc tần suất — từ chỉ xuất
+hiện 1 lần vẫn được boost như nhau.
 
-Request body:
-
-- `passphrase` (bắt buộc): mật mã người dùng
-- `context` (bắt buộc): mảng các từ, tối thiểu 2 phần tử
-
-Ví dụ:
-
-```bash
-curl -X POST http://localhost:8000/api/learn \
-  -H "Content-Type: application/json" \
-  -d '{
-    "passphrase": "mysecret",
-    "context": ["uong", "thuốc"]
-  }'
+```python
+conn.learn_text("Bệnh nhân được chỉ định uống thuốc kháng sinh")
 ```
-
-Response:
 
 ```json
-{ "status": "ok" }
+{"ok": true, "op": "learn_text", "status": "ok",
+ "words_added": 15, "contexts_added": 27, "total_words": 15}
 ```
 
-Học với context dài hơn (N-gram):
+#### `learn`
 
-```bash
-curl -X POST http://localhost:8000/api/learn \
-  -H "Content-Type: application/json" \
-  -d '{
-    "passphrase": "mysecret",
-    "context": ["đã", "uống", "thuốc"]
-  }'
+Ghi nhận lựa chọn của người dùng. Context là chuỗi từ đã sửa, từ cuối là gợi ý được
+chọn; mọi cấp độ ngữ cảnh đều được ghi lại. Cần ít nhất 2 phần tử.
+
+```python
+conn.learn(["đã", "uống", "thuốc"])
 ```
-
-#### `POST /api/learn/text`
-
-Gửi văn bản tự do để hệ thống học từ mới và ngữ cảnh (không phụ thuộc tần suất — từ xuất hiện 1 lần cũng được boost như nhau).
-
-Request body:
-
-- `passphrase` (bắt buộc)
-- `text` (bắt buộc): văn bản cần học
-
-Ví dụ:
-
-```bash
-curl -X POST http://localhost:8000/api/learn/text \
-  -H "Content-Type: application/json" \
-  -d '{
-    "passphrase": "mysecret",
-    "text": "Bệnh nhân được chỉ định uống thuốc kháng sinh và tái khám sau một tuần"
-  }'
-```
-
-Response:
 
 ```json
-{
-  "status": "ok",
-  "words_added": 15,
-  "contexts_added": 27,
-  "total_words": 15
-}
+{"ok": true, "op": "learn", "status": "ok"}
 ```
 
-#### `GET /api/profile`
+#### `profile`
 
-Xem thông tin dữ liệu cá nhân hóa hiện tại.
-
-Query parameter:
-
-- `passphrase` (bắt buộc)
-
-Ví dụ:
-
-```bash
-curl "http://localhost:8000/api/profile?passphrase=mysecret"
+```python
+conn.profile()
 ```
-
-Response:
 
 ```json
-{
-  "user_hash": "652c7dc687d98c9889304ed2e408c74b",
-  "learned_words": 15,
-  "learned_contexts": 27,
-  "memory_size": 3
-}
+{"ok": true, "op": "profile",
+ "learned_words": 15, "learned_contexts": 27, "memory_size": 3}
 ```
 
-#### `DELETE /api/personalization`
+`profile` không trả đường dẫn lưu trữ. Muốn biết vị trí thì suy ra từ quy ước XDG
+nêu ở mục "Lưu trữ".
 
-Xoá toàn bộ dữ liệu cá nhân hóa (cả từ/text học được lẫn bộ nhớ thói quen).
+#### `clear`
 
-Request body:
+Xoá toàn bộ dữ liệu cá nhân hóa: cả từ/context học được lẫn bộ nhớ thói quen.
 
-- `passphrase` (bắt buộc)
-
-Ví dụ:
-
-```bash
-curl -X DELETE http://localhost:8000/api/personalization \
-  -H "Content-Type: application/json" \
-  -d '{"passphrase": "mysecret"}'
+```python
+conn.clear()
 ```
-
-Response:
 
 ```json
-{ "status": "ok" }
+{"ok": true, "op": "clear", "status": "ok"}
 ```
 
-### Luồng tích hợp frontend
+### Luồng tích hợp
 
-1. **Học từ văn bản**: Khi người dùng nhập một đoạn văn bản chuyên ngành, gửi đến `/api/learn/text` để hệ thống học từ mới + context
-2. Kiểm tra chính tả với `passphrase` qua `/api/check`
-3. Khi người dùng chọn một gợi ý, gửi context (luồng Viterbi của gợi ý đó) đến `/api/learn`
+1. **Học từ văn bản**: khi người dùng có đoạn văn bản chuyên ngành, gửi `learn_text`
+   một lần cho mỗi domain
+2. Kiểm tra chính tả với `check`
+3. Khi người dùng chọn một gợi ý, gửi `learn` với chuỗi từ của gợi ý đó
 
-```js
-// Bước 0: Học từ văn bản (chỉ cần làm 1 lần cho mỗi domain)
-await fetch("http://localhost:8000/api/learn/text", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({
-    passphrase: userPassphrase,
-    text: userDocument,
-  }),
-});
+```python
+from client import SpellCheckerClient
+from paths import socket_path
 
-// Bước 1: Kiểm tra chính tả
-const check = await fetch("http://localhost:8000/api/check", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({
-    text: userInput,
-    passphrase: userPassphrase,
-    top_k: 5,
-  }),
-});
-const { suggestions, best_correction } = await check.json();
+with SpellCheckerClient(socket_path()) as conn:
+    # Bước 0: học từ văn bản, chỉ cần làm 1 lần cho mỗi domain
+    conn.learn_text(user_document)
 
-// Bước 2: Người dùng chọn một gợi ý → học thói quen
-const viterbiPath = selectedSuggestion.split(" ");
-await fetch("http://localhost:8000/api/learn", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({
-    passphrase: userPassphrase,
-    context: viterbiPath,
-  }),
-});
+    # Bước 1: kiểm tra chính tả
+    result = conn.check(user_input, top_k=5)
+    suggestions = result["suggestions"]
+
+    # Bước 2: người dùng chọn một gợi ý để học thói quen
+    conn.learn(selected_suggestion.split(" "))
 ```
+
+Connection giữ mở xuyên suốt phiên, nên ba bước trên dùng chung một socket.
 
 ### Học từ văn bản vs Bộ nhớ thói quen
 
-| Đặc tính          | Học từ văn bản (`/api/learn/text`) | Bộ nhớ thói quen (`/api/learn`) |
+| Đặc tính          | Học từ văn bản (operation `learn_text`) | Bộ nhớ thói quen (operation `learn`) |
 | ----------------- | ----------------------------------- | ------------------------------- |
 | Kích hoạt         | Paste văn bản                       | Chọn candidate từ gợi ý         |
 | Tác dụng          | Thêm từ + context vào danh sách ưu tiên | Tăng dần điểm theo số lần chọn  |

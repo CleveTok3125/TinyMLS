@@ -38,7 +38,6 @@ class SpellCheckerConfig:
     max_personal_memory_size: int = 10000
     priority_score: float = 5.0
     boost_factor: float = 2.0
-    personalization_dir: str = "data/personalization"
 
     @classmethod
     def from_json(cls, json_path: str) -> "SpellCheckerConfig":
@@ -47,6 +46,8 @@ class SpellCheckerConfig:
                 with open(json_path, encoding="utf-8") as f:
                     data = json.load(f)
 
+                # Personalization_dir is deliberately not a field: storage
+                # location follows the XDG data directory.
                 valid_keys = {f.name for f in dataclasses.fields(cls)}
                 filtered_data = {k: v for k, v in data.items() if k in valid_keys}
 

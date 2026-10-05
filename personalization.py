@@ -1,11 +1,17 @@
-import hashlib
 import json
 import os
-import shutil
-from collections import OrderedDict
+import unicodedata
+from collections import OrderedDict, defaultdict
 from threading import Lock
 
+from paths import personalization_dir as default_personalization_dir
 from vietnamese import extract_ngrams, extract_sentences_with_words
+
+_EMPTY_WORDS: frozenset[str] = frozenset()
+
+
+def _initial(word: str) -> str:
+    return word[0] if word else ""
 
 
 class PersonalizationMemory:
@@ -60,34 +66,40 @@ class PersonalizationMemory:
 
 
 class PersonalizationManager:
+    """Learned vocabulary and correction history for the local user.
+
+    One instance per process. Storage location comes from the XDG data
+    directory, so users are separated by their home directory rather than by a
+    key the caller has to supply.
+    """
+
     def __init__(
         self,
-        passphrase: str,
-        data_dir: str = "data/personalization",
+        data_dir: str | None = None,
         max_memory_size: int = 10000,
         priority_score: float = 5.0,
         boost_factor: float = 2.0,
     ):
-        self._user_hash = self._passphrase_hash(passphrase)
-        self._base_dir = os.path.join(data_dir, self._user_hash)
+        self._base_dir = data_dir or default_personalization_dir()
         self._max_memory_size = max_memory_size
         self._priority_score = priority_score
         self._boost_factor = boost_factor
         self._memory = PersonalizationMemory(max_size=max_memory_size)
         self._learned_words: set[str] = set()
         self._learned_contexts: set[str] = set()
+        self._words_by_initial: dict[str, set[str]] = defaultdict(set)
         self._lock = Lock()
 
         os.makedirs(self._base_dir, exist_ok=True)
         self.load()
 
-    @staticmethod
-    def _passphrase_hash(passphrase: str) -> str:
-        return hashlib.sha256(passphrase.encode()).hexdigest()[:32]
-
     @property
     def memory(self) -> PersonalizationMemory:
         return self._memory
+
+    @property
+    def base_dir(self) -> str:
+        return self._base_dir
 
     def _memory_path(self) -> str:
         return os.path.join(self._base_dir, "memory.json")
@@ -109,6 +121,7 @@ class PersonalizationManager:
                 data = json.load(f)
             self._learned_words = set(data.get("words", []))
             self._learned_contexts = set(data.get("contexts", []))
+            self._rebuild_initial_index()
 
     def save(self) -> None:
         mem_path = self._memory_path()
@@ -127,6 +140,38 @@ class PersonalizationManager:
                 indent=2,
             )
 
+    def _rebuild_initial_index(self) -> None:
+        """Reindex from disk, normalising so keys match the NFC token used at
+        scoring time. Files written by older versions may not be normalised."""
+        normalised = {
+            unicodedata.normalize("NFC", w) for w in self._learned_words
+        }
+        self._learned_words = normalised
+        self._words_by_initial = defaultdict(set)
+        for word in normalised:
+            self._words_by_initial[_initial(word)].add(word)
+
+    def _add_learned_word(self, word: str) -> bool:
+        # Stored in NFC so the first-character index lines up with the NFC
+        # token used at scoring time.
+        word = unicodedata.normalize("NFC", word)
+        if word in self._learned_words:
+            return False
+        self._learned_words.add(word)
+        self._words_by_initial[_initial(word)].add(word)
+        return True
+
+    def get_priority_words(self, initial: str | None = None) -> set[str]:
+        """Learned words, optionally narrowed to those starting with initial.
+
+        Candidate generation only ever accepts a learned word whose first
+        character matches the token, so indexing by that character turns a scan
+        over every learned word into one dict lookup.
+        """
+        if initial is None:
+            return self._learned_words
+        return self._words_by_initial.get(initial) or _EMPTY_WORDS
+
     def learn_text(self, text: str) -> dict:
         sentences = extract_sentences_with_words(text)
         added_words = 0
@@ -134,8 +179,7 @@ class PersonalizationManager:
 
         for words in sentences:
             for w in words:
-                if w not in self._learned_words:
-                    self._learned_words.add(w)
+                if self._add_learned_word(w):
                     added_words += 1
 
             for key in extract_ngrams(words, 2, 3):
@@ -151,9 +195,6 @@ class PersonalizationManager:
             "total_words": total_words,
         }
 
-    def get_priority_words(self) -> set[str]:
-        return self._learned_words
-
     def compute_boost(
         self,
         candidate: str,
@@ -166,12 +207,10 @@ class PersonalizationManager:
         if prev_word:
             if f"{prev_word} {candidate}" in self._learned_contexts:
                 boost += self._priority_score
-            if prev_prev_word:
-                if (
-                    f"{prev_prev_word} {prev_word} {candidate}"
-                    in self._learned_contexts
-                ):
-                    boost += self._priority_score
+            if prev_prev_word and (
+                f"{prev_prev_word} {prev_word} {candidate}" in self._learned_contexts
+            ):
+                boost += self._priority_score
 
             mem_ctx = [prev_word]
             if prev_prev_word:
@@ -182,7 +221,7 @@ class PersonalizationManager:
         return boost
 
     def learn_selection(self, context: list[str]) -> None:
-        if len(context) < 2:  # noqa: PLR2004
+        if len(context) < 2:
             return
         selected = context[-1]
         for i in range(len(context) - 2, -1, -1):
@@ -191,20 +230,25 @@ class PersonalizationManager:
         self.save()
 
     def clear_all(self) -> None:
+        """Drop learned data and its files, keeping the directory in place.
+
+        The directory is removed too so stale files cannot survive, but only the
+        two files this class owns are ever deleted.
+        """
         self._memory.clear()
         self._learned_words.clear()
         self._learned_contexts.clear()
-        if os.path.exists(self._base_dir):
-            shutil.rmtree(self._base_dir)
+        self._words_by_initial.clear()
         os.makedirs(self._base_dir, exist_ok=True)
+        for path in (self._memory_path(), self._learned_path()):
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
 
     def clear_memory(self) -> None:
         self._memory.clear()
         self.save()
-
-    @property
-    def user_hash(self) -> str:
-        return self._user_hash
 
     @property
     def memory_size(self) -> int:
@@ -221,7 +265,6 @@ class PersonalizationManager:
     @property
     def profile(self) -> dict:
         return {
-            "user_hash": self._user_hash,
             "learned_words": self.learned_word_count,
             "learned_contexts": self.learned_context_count,
             "memory_size": self.memory_size,
