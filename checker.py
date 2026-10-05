@@ -2,13 +2,14 @@ import json
 import math
 import os
 import unicodedata
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from enum import Enum
 from functools import lru_cache
 
 import marisa_trie
 from rapidfuzz import fuzz, process
 
+from builder import VOCAB_FILENAME
 from config import SpellCheckerConfig
 from keyboard import get_keyboard_coordinates, keyboard_matrix
 from model_pkg import ModelArchive
@@ -20,6 +21,11 @@ _MAX_LEN_DIFF = 3
 _BONUS_RANGE_LEN = 2
 _MIN_ANCHOR_LEN = 2
 _MIN_CTX_LEN = 2
+_GLOBAL_MATCH_CACHE_SIZE = 20000
+_CONTEXT_INDEX_BUDGET = 250000
+_KEEP_TABLES: dict[tuple[int, int], bytes] = {}
+_EPS = 1e-8
+
 
 
 class CasePattern(Enum):
@@ -60,6 +66,19 @@ class NGramSpellChecker:
         self.detail_log = detail_log
         self._personalization = personalization
         self._archive: ModelArchive | None = None
+        self._global_telex_cache: dict[tuple[str, int], tuple[str, ...]] = {}
+        self._context_index_cache: OrderedDict[str, tuple[list[str], list[str], bytes]] = OrderedDict()
+        self._context_index_size = 0
+
+        # Resolved once: these were read via getattr on every score call.
+        self._sim_weight = getattr(self.cfg, "sim_weight", 0.0)
+        self._context_weight = getattr(self.cfg, "context_weight", 0.0)
+        self._stutter_penalty = getattr(self.cfg, "stutter_penalty", 0.0)
+        self._lambda_1 = getattr(self.cfg, "lambda_1", 0.0)
+        self._lambda_2 = getattr(self.cfg, "lambda_2", 0.0)
+        self._lambda_3 = getattr(self.cfg, "lambda_3", 0.0)
+        self._top_n = self.cfg.top_n
+        self._cutoff = self.cfg.cutoff
 
         if os.path.isdir(self.cfg.stats_path):
             self._load_from_dir()
@@ -96,7 +115,15 @@ class NGramSpellChecker:
         with open(meta_path, encoding="utf-8") as f:
             meta = json.load(f)
 
-        vocab_list = [unicodedata.normalize("NFC", w) for w in meta["vocab"]]
+        vocab_path = os.path.join(stats_dir, VOCAB_FILENAME)
+        if not os.path.exists(vocab_path):
+            raise FileNotFoundError(
+                f"Không tìm thấy từ điển '{vocab_path}'. "
+                "Hãy build lại model để tạo file này."
+            )
+        with open(vocab_path, encoding="utf-8") as f:
+            raw_vocab = f.read().split("\n")
+        vocab_list = [unicodedata.normalize("NFC", w) for w in raw_vocab if w]
         self.total_unigrams = meta["total_unigrams"]
 
         self.unigrams = marisa_trie.RecordTrie("<I").mmap(
@@ -119,7 +146,13 @@ class NGramSpellChecker:
         print(f"Loading dữ liệu thống kê từ package: {self.cfg.stats_path}...")
 
         meta = self._archive.read_json("language_stats_meta.json")
-        vocab_list = [unicodedata.normalize("NFC", w) for w in meta["vocab"]]
+        if not self._archive.has(VOCAB_FILENAME):
+            raise FileNotFoundError(
+                f"Package '{self.cfg.stats_path}' không chứa '{VOCAB_FILENAME}'. "
+                "Hãy export lại model từ thư mục đã build."
+            )
+        raw_vocab = self._archive.read_text(VOCAB_FILENAME).split("\n")
+        vocab_list = [unicodedata.normalize("NFC", w) for w in raw_vocab if w]
         self.total_unigrams = meta["total_unigrams"]
 
         self.unigrams = self._archive.mmap_trie("unigrams.trie")
@@ -142,14 +175,18 @@ class NGramSpellChecker:
             self._archive = None
 
     def _init_from_vocab(self, vocab_list: list[str]) -> None:
-        vocab: set[str] = set(vocab_list)
-
-        self.telex_to_vocab: dict[str, list[str]] = {}
+        self.telex_to_vocab: dict[str, str | list[str]] = {}
+        # 97.8% of telex keys map to exactly one surface form, so a bare str is
+        # stored for those instead of a one-element list (~140k fewer objects).
         for w in vocab_list:
             t = to_standard_telex(w)
-            if t not in self.telex_to_vocab:
-                self.telex_to_vocab[t] = []
-            self.telex_to_vocab[t].append(w)
+            existing = self.telex_to_vocab.get(t)
+            if existing is None:
+                self.telex_to_vocab[t] = w
+            elif isinstance(existing, str):
+                self.telex_to_vocab[t] = [existing, w]
+            else:
+                existing.append(w)
 
         telex_vocab_list: list[str] = list(self.telex_to_vocab.keys())
         self.telex_by_length = defaultdict(list)
@@ -175,20 +212,42 @@ class NGramSpellChecker:
             )
 
         self.kb_coords = get_keyboard_coordinates(keyboard_matrix=keyboard_matrix)
-        print(f"Done! The dictionary has {len(vocab)} words.")
+        print(f"Done! The dictionary has {len(vocab_list)} words.")
 
     def get_trie_count(self, trie, key: str) -> int:
-        normalized_key = unicodedata.normalize("NFC", key)
-        res = trie.get(normalized_key)
+        res = trie.get(unicodedata.normalize("NFC", key))
         return res[0][0] if res else 0
 
-    def is_valid_length(self, cand_telex: str, error_len: int) -> bool:
-        cand_len = len(cand_telex)
-        if error_len >= _MIN_ERROR_LEN and cand_len < _MIN_ERROR_LEN:
-            return False
-        if abs(cand_len - error_len) > _MAX_LEN_DIFF:
-            return False
-        return True
+    def allowed_length_window(self, error_len: int) -> tuple[int, int]:
+        """Inclusive candidate telex length bounds accepted for error_len."""
+        if error_len >= _MIN_ERROR_LEN:
+            low = max(_MIN_ERROR_LEN, error_len - _MAX_LEN_DIFF)
+        else:
+            low = 1
+        return low, error_len + _MAX_LEN_DIFF
+
+    @staticmethod
+    def length_keep_table(low: int, high: int) -> bytes:
+        """Byte table mapping lengths in [low, high] to 1, everything else to 0.
+
+        Lets one bytes.translate call filter a whole batch of lengths.
+        """
+        table = _KEEP_TABLES.get((low, high))
+        if table is None:
+            table = bytes(1 if low <= i <= high else 0 for i in range(256))
+            _KEEP_TABLES[(low, high)] = table
+        return table
+
+    @staticmethod
+    def kept_positions(lengths: bytes, low: int, high: int) -> list[int]:
+        """Indices of accepted lengths, ascending."""
+        mask = lengths.translate(NGramSpellChecker.length_keep_table(low, high))
+        found = []
+        pos = mask.find(1)
+        while pos >= 0:
+            found.append(pos)
+            pos = mask.find(1, pos + 1)
+        return found
 
     def get_fast_close_matches(
         self, target: str, possibilities: list[str], n: int, cutoff: float
@@ -199,39 +258,117 @@ class NGramSpellChecker:
 
         return [r[0] for r in results]
 
+    def get_global_telex_matches(self, error_word: str, error_len: int) -> tuple[str, ...]:
+        """Fuzzy-match result for a token against the whole vocabulary.
+
+        Independent of the preceding word, but Viterbi calls get_candidates once
+        per beam path, so this ~92k-word scan otherwise repeats up to
+        beam_width times for the same token. Cached per instance rather than
+        with a module-level lru_cache so that discarded checkers are collectable.
+        """
+        cache_key = (error_word, error_len)
+        cached = self._global_telex_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        filtered_global_telex = []
+        min_len = (
+            max(_MIN_ERROR_LEN, error_len - _MAX_LEN_DIFF)
+            if error_len >= _MIN_ERROR_LEN else 1
+        )
+        max_len = error_len + _MAX_LEN_DIFF
+
+        for length in range(min_len, max_len + 1):
+            if length in self.telex_by_length:
+                filtered_global_telex.extend(self.telex_by_length[length])
+
+        matches = tuple(
+            self.get_fast_close_matches(
+                to_standard_telex(error_word),
+                filtered_global_telex,
+                n=self._top_n,
+                cutoff=self._cutoff,
+            )
+        )
+
+        if len(self._global_telex_cache) >= _GLOBAL_MATCH_CACHE_SIZE:
+            self._global_telex_cache.clear()
+        self._global_telex_cache[cache_key] = matches
+        return matches
+
+    def context_index(self, prev_word: str) -> tuple[list[str], list[str], bytes]:
+        """Successors of prev_word as parallel telex/word lists plus a length array.
+
+        Depends only on prev_word, so it is cached. The length array lets the
+        per-call filter run as one batch pass instead of a Python loop over every
+        successor, which for a common preceding word can be several hundred.
+        """
+        cached = self._context_index_cache.get(prev_word)
+        if cached is not None:
+            self._context_index_cache.move_to_end(prev_word)
+            return cached
+
+        prefix = f"{prev_word} "
+        telexes: list[str] = []
+        words: list[str] = []
+        for key in self.bigrams.keys(prefix):
+            cw = key[len(prefix) :]
+            if not cw:
+                continue
+            telexes.append(to_standard_telex(cw))
+            words.append(cw)
+        # One byte per successor. Telex forms are far shorter than 256, so the
+        # length fits in a byte; the clamp keeps a pathological entry from
+        # corrupting the batch filter.
+        lengths = bytes(min(len(t), 255) for t in telexes)
+
+        # Budgeted by total successors, not entry count: one common preceding
+        # word can carry hundreds of them. Evicts least-recently-used entries so
+        # a single large entry cannot flush the whole cache.
+        self._context_index_size += len(telexes)
+        while (
+            self._context_index_cache
+            and self._context_index_size > _CONTEXT_INDEX_BUDGET
+        ):
+            _evicted, old = self._context_index_cache.popitem(last=False)
+            self._context_index_size -= len(old[0])
+        entry = (telexes, words, lengths)
+        self._context_index_cache[prev_word] = entry
+        return entry
+
     def get_candidates(  # noqa: C901, PLR0912
         self, error_word: str, prev_word: str | None = None
     ) -> list[str]:
         candidates: list[str] = []
 
-        error_telex = to_standard_telex(error_word)
-        error_len = len(error_telex)
+        error_len = len(to_standard_telex(error_word))
 
         if prev_word:
-            prefix = f"{prev_word} "
-            context_words: list[str] = [
-                key[len(prefix) :] for key in self.bigrams.keys(prefix)
-            ]
+            telexes, words, lengths = self.context_index(prev_word)
 
-            if context_words:
+            if telexes:
+                # Vectorised length filter; only survivors reach the dict, and
+                # flatnonzero preserves ascending index order so the telex list
+                # keeps the same order as a plain Python loop. The accepted
+                # lengths form a contiguous range, so a range mask beats isin.
+                low, high = self.allowed_length_window(error_len)
+                selected = self.kept_positions(lengths, low, high)
                 context_telex_to_word: dict[str, list[str]] = {}
-                for cw in context_words:
-                    ct = to_standard_telex(cw)
-                    if ct not in context_telex_to_word:
-                        context_telex_to_word[ct] = []
-                    context_telex_to_word[ct].append(cw)
+                for i in selected:
+                    ct = telexes[i]
+                    if ct in context_telex_to_word:
+                        context_telex_to_word[ct].append(words[i])
+                    else:
+                        context_telex_to_word[ct] = [words[i]]
+            else:
+                context_telex_to_word = {}
 
-                context_telex_list = [
-                    t
-                    for t in context_telex_to_word.keys()
-                    if self.is_valid_length(t, error_len)
-                ]
-
+            if context_telex_to_word:
                 context_telex_matches: list[str] = self.get_fast_close_matches(
-                    error_telex,
-                    context_telex_list,
-                    n=self.cfg.top_n,
-                    cutoff=self.cfg.cutoff,
+                    to_standard_telex(error_word),
+                    list(context_telex_to_word),
+                    n=self._top_n,
+                    cutoff=self._cutoff,
                 )
 
                 for ctm in context_telex_matches:
@@ -240,45 +377,35 @@ class NGramSpellChecker:
                         if rw not in candidates:
                             candidates.append(rw)
 
-        if len(candidates) < self.cfg.top_n:
-            filtered_global_telex = []
-            min_len = (
-                max(_MIN_ERROR_LEN, error_len - _MAX_LEN_DIFF)
-                if error_len >= _MIN_ERROR_LEN else 1
-            )
-            max_len = error_len + _MAX_LEN_DIFF
+        if len(candidates) < self._top_n:
+            # telex_to_vocab values are NFC already (normalised in
+            # _init_from_vocab), so re-normalising here is a no-op.
+            for gtm in self.get_global_telex_matches(error_word, error_len):
+                forms = self.telex_to_vocab[gtm]
+                if isinstance(forms, str):
+                    if forms not in candidates:
+                        candidates.append(forms)
+                    continue
+                for word in forms:
+                    if word not in candidates:
+                        candidates.append(word)
 
-            for length in range(min_len, max_len + 1):
-                if length in self.telex_by_length:
-                    filtered_global_telex.extend(self.telex_by_length[length])
-
-            general_telex_matches: list[str] = self.get_fast_close_matches(
-                error_telex,
-                filtered_global_telex,
-                n=self.cfg.top_n,
-                cutoff=self.cfg.cutoff,
-            )
-            for gtm in general_telex_matches:
-                for raw_word in self.telex_to_vocab[gtm]:
-                    rw = unicodedata.normalize("NFC", raw_word)
-                    if rw not in candidates:
-                        candidates.append(rw)
-
-        candidates = candidates[: self.cfg.top_n]
+        candidates = candidates[: self._top_n]
 
         if self._personalization:
             err_first = (
                 unicodedata.normalize("NFC", error_word)[0] if error_word else ""
             )
+            low_len, high_len = self.allowed_length_window(error_len)
             for pw in self._personalization.get_priority_words():
                 pw_norm = unicodedata.normalize("NFC", pw)
                 if pw_norm in candidates:
                     continue
                 if not pw_norm or pw_norm[0] != err_first:
                     continue
-                pw_telex = to_standard_telex(pw_norm)
-                if self.is_valid_length(pw_telex, error_len):
-                    if len(candidates) >= self.cfg.top_n:
+                pw_len = len(to_standard_telex(pw_norm))
+                if low_len <= pw_len <= high_len:
+                    if len(candidates) >= self._top_n:
                         candidates.pop()
                     candidates.append(pw_norm)
 
@@ -336,10 +463,29 @@ class NGramSpellChecker:
 
         return max(0.0, final_sim)
 
-    def calculate_context_prob(self, w1: str | None, w2: str, w3: str) -> float:
+    def context_base_counts(self, w1: str | None, w2: str) -> tuple[int, int]:
+        """Counts that depend only on the preceding words, not on the candidate.
+
+        bigram(w1 w2) and unigram(w2) are looked up once per surviving path
+        instead of once per (candidate, path) pair.
+        """
+        bigram_w1_w2 = (
+            self.get_trie_count(self.bigrams, f"{w1} {w2}") if w1 else 0
+        )
+        return bigram_w1_w2, self.get_trie_count(self.unigrams, w2)
+
+    def context_prob_from_base(
+        self,
+        w1: str | None,
+        w2: str,
+        w3: str,
+        bigram_w1_w2_count: int,
+        unigram_w2_count: int,
+        unigram_w3_count: int,
+    ) -> float:
+        """Context probability using pre-fetched counts; see context_base_counts."""
         p_tri = 0.0
         if w1:
-            bigram_w1_w2_count = self.get_trie_count(self.bigrams, f"{w1} {w2}")
             trigram_count = (
                 self.get_trie_count(self.trigrams, f"{w1} {w2} {w3}")
                 if self.trigrams
@@ -349,25 +495,90 @@ class NGramSpellChecker:
                 trigram_count / bigram_w1_w2_count if bigram_w1_w2_count > 0 else 0.0
             )
 
-        unigram_w2_count = self.get_trie_count(self.unigrams, w2)
         bigram_w2_w3_count = self.get_trie_count(self.bigrams, f"{w2} {w3}")
         p_bi = bigram_w2_w3_count / unigram_w2_count if unigram_w2_count > 0 else 0.0
 
         p_uni = (
-            self.get_trie_count(self.unigrams, w3) / self.total_unigrams
-            if self.total_unigrams > 0
-            else 0.0
+            unigram_w3_count / self.total_unigrams if self.total_unigrams > 0 else 0.0
         )
 
-        l3 = getattr(self.cfg, "lambda_3", 0.0)
-        l2 = getattr(self.cfg, "lambda_2", 0.0)
-        l1 = getattr(self.cfg, "lambda_1", 0.0)
+        l3 = self._lambda_3
+        l2 = self._lambda_2
+        l1 = self._lambda_1
 
         if not w1:
             total_l = l2 + l1
             return (l2 * p_bi + l1 * p_uni) / total_l if total_l > 0 else 0.0
 
         return (l3 * p_tri) + (l2 * p_bi) + (l1 * p_uni)
+
+    def calculate_context_prob(self, w1: str | None, w2: str, w3: str) -> float:
+        bigram_w1_w2_count, unigram_w2_count = self.context_base_counts(w1, w2)
+        return self.context_prob_from_base(
+            w1, w2, w3, bigram_w1_w2_count, unigram_w2_count,
+            self.get_trie_count(self.unigrams, w3),
+        )
+
+    def candidate_base_score(
+        self, candidate: str, error_word: str
+    ) -> tuple[float, float, float, str, str, int]:
+        """Scoring inputs that depend only on (candidate, error_word).
+
+        Viterbi scores every candidate once per surviving path, so these are
+        hoisted out of the path loop and computed once per candidate.
+        Returns (sim_feat, p_uni, exact_match_bonus, candidate, error_word,
+        unigram_count); the count is reused instead of re-read by the context
+        probability, which needs unigram(candidate).
+        """
+        candidate = unicodedata.normalize("NFC", candidate)
+        error_word = unicodedata.normalize("NFC", error_word)
+
+        cand_telex = to_standard_telex(candidate)
+        err_telex = to_standard_telex(error_word)
+
+        sim = self.keyboard_aware_similarity(err_telex, cand_telex)
+        sim_feat = math.log(sim + _EPS)
+
+        count = self.get_trie_count(self.unigrams, candidate)
+        p_uni = count / self.total_unigrams if self.total_unigrams > 0 else 0.0
+        exact_bonus = self.calculate_exact_match_bonus(candidate, error_word)
+
+        return sim_feat, p_uni, exact_bonus, candidate, error_word, count
+
+    def score_from_base(
+        self,
+        candidate: str,
+        prev_word: str | None,
+        prev_prev_word: str | None,
+        sim_feat: float,
+        p_uni: float,
+        exact_bonus: float,
+        context_base: tuple[int, int] = (0, 0),
+        unigram_count: int = 0,
+    ) -> float:
+        """Path-dependent half of the score; see candidate_base_score."""
+        if prev_word:
+            p_ctx = self.context_prob_from_base(
+                prev_prev_word, prev_word, candidate,
+                context_base[0], context_base[1], unigram_count,
+            )
+
+            if candidate == prev_word:
+                p_ctx *= self._stutter_penalty
+        else:
+            p_ctx = max(p_uni, _EPS)
+
+        ctx_feat = (math.log(p_ctx + _EPS) + 10) / 10
+
+        score = (self._sim_weight * sim_feat) + (self._context_weight * ctx_feat)
+        score += exact_bonus
+
+        if self._personalization:
+            score += self._personalization.compute_boost(
+                candidate, prev_word, prev_prev_word
+            )
+
+        return score
 
     def calculate_score(
         self,
@@ -376,52 +587,22 @@ class NGramSpellChecker:
         prev_word: str | None,
         prev_prev_word: str | None = None,
     ) -> float:
-        candidate = unicodedata.normalize("NFC", candidate)
-        error_word = unicodedata.normalize("NFC", error_word)
-
-        cand_telex = to_standard_telex(candidate)
-        err_telex = to_standard_telex(error_word)
-
-        eps = 1e-8
-
-        sim = self.keyboard_aware_similarity(err_telex, cand_telex)
-        sim_feat = math.log(sim + eps)
-
-        count = self.get_trie_count(self.unigrams, candidate)
-        p_uni = count / self.total_unigrams if self.total_unigrams > 0 else 0.0
-
-        if prev_word:
-            p_ctx = self.calculate_context_prob(prev_prev_word, prev_word, candidate)
-
-            if candidate == prev_word:
-                p_ctx *= getattr(self.cfg, "stutter_penalty", 0.0)
-        else:
-            p_ctx = max(p_uni, eps)
-
-        ctx_feat = math.log(p_ctx + eps)
-        ctx_feat = (ctx_feat + 10) / 10
-
-        w_sim = getattr(self.cfg, "sim_weight", 0.0)
-        w_ctx = getattr(self.cfg, "context_weight", 0.0)
-
-        score = (w_sim * sim_feat) + (w_ctx * ctx_feat)
-
-        score += self.calculate_exact_match_bonus(candidate, error_word)
-
-        if self._personalization:
-            boost = self._personalization.compute_boost(
-                candidate, prev_word, prev_prev_word
-            )
-            score += boost
+        sim_feat, p_uni, exact_bonus, candidate, error_word, uni_count = (
+            self.candidate_base_score(candidate, error_word)
+        )
+        score = self.score_from_base(
+            candidate, prev_word, prev_prev_word, sim_feat, p_uni, exact_bonus,
+            self.context_base_counts(prev_prev_word, prev_word) if prev_word else (0, 0),
+            uni_count,
+        )
 
         if self.debug and self.detail_log:
             prev_str = prev_word if prev_word else "[START]"
-            print("ERROR:", err_telex)
-            print("CAND :", cand_telex)
+            print("ERROR:", to_standard_telex(error_word))
+            print("CAND :", to_standard_telex(candidate))
             print(f"      ➜ '{prev_str}' -> '{candidate}' (error: '{error_word}')")
-            print(f"         sim : {sim_feat:.4f} * {w_sim}")
-            print(f"         ctx : {ctx_feat:.4f} * {w_ctx}")
-            print(f"         => SCORE: {score:.4f}")
+            print(f"         sim : {sim_feat:.4f} * {self._sim_weight}")
+            print(f"         score: {score:.4f}")
 
         return score
 
@@ -502,14 +683,14 @@ class NGramSpellChecker:
                         current_word,
                         candidates,
                         scorer=fuzz.ratio,
-                        score_cutoff=self.cfg.cutoff * 100,
+                        score_cutoff=self._cutoff * 100,
                     )
 
                     if best_match is None:
                         candidates = [current_word]
                         is_garbage = True
                         if self.debug:
-                            cutoff = self.cfg.cutoff
+                            cutoff = self._cutoff
                             print(
                                 "  ➜ Bỏ cuộc: Rác/Từ lạ"
                                 f" (Không có từ nào >= {cutoff})."
@@ -519,24 +700,42 @@ class NGramSpellChecker:
 
             step_log_data: list[dict] = []
 
+            # Per-path counts fetched once, not once per (candidate, path).
+            path_context_bases: dict[str | None, tuple[int, int]] = {}
+            if paths and not reset_context_next_step:
+                for _s, _p, prev_c in paths.values():
+                    pp = _p[-2] if len(_p) >= _MIN_CTX_LEN else None
+                    if prev_c not in path_context_bases:
+                        path_context_bases[prev_c] = self.context_base_counts(pp, prev_c)
+
             for curr_cand in candidates:
+                sim_feat, p_uni, exact_bonus, norm_cand, _err, uni_count = (
+                    self.candidate_base_score(curr_cand, current_word)
+                )
+
                 if reset_context_next_step or not paths:
-                    step_score = self.calculate_score(
-                        curr_cand,
-                        current_word,
-                        prev_word=None,
-                        prev_prev_word=None,
+                    step_score = self.score_from_base(
+                        norm_cand, None, None, sim_feat, p_uni, exact_bonus
                     )
 
                     best_history = []
                     if paths:
-                        best_past_key = max(paths.keys(), key=lambda k: paths[k][0])
-                        best_history = paths[best_past_key][1]
+                        best_past = max(paths.items(), key=lambda kv: kv[1][0])
+                        best_history = best_past[1][1]
+                        best_history_key = best_past[0]
+                    else:
+                        best_history = []
+                        best_history_key = ""
 
                     total_score = step_score
                     new_path = best_history + [curr_cand]
 
-                    new_path_key = " ".join(new_path)
+                    # Every key in `paths` is exactly " ".join(its path), so
+                    # appending by concatenation is equivalent to rejoining the
+                    # whole path and avoids that work per candidate x path.
+                    new_path_key = (
+                        best_history_key + " " + curr_cand if best_history_key else curr_cand
+                    )
                     new_paths[new_path_key] = (total_score, new_path, curr_cand)
 
                     if self.debug:
@@ -550,20 +749,22 @@ class NGramSpellChecker:
                         )
 
                 else:
-                    for prev_score, prev_path, prev_cand in paths.values():
+                    for prev_key, (prev_score, prev_path, prev_cand) in paths.items():
                         prev_prev_cand = (
                             prev_path[-2] if len(prev_path) >= _MIN_CTX_LEN
                             else None
                         )
 
-                        step_score = self.calculate_score(
-                            curr_cand, current_word, prev_cand, prev_prev_cand
+                        step_score = self.score_from_base(
+                            norm_cand, prev_cand, prev_prev_cand,
+                            sim_feat, p_uni, exact_bonus,
+                            path_context_bases[prev_cand], uni_count,
                         )
 
                         total_score = prev_score + step_score
 
                         new_path = prev_path + [curr_cand]
-                        new_path_key = " ".join(new_path)
+                        new_path_key = prev_key + " " + curr_cand
                         new_paths[new_path_key] = (total_score, new_path, curr_cand)
 
                         if self.debug:

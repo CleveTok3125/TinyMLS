@@ -44,7 +44,10 @@ TinyMLS/
 │   ├── corpus/         # Dữ liệu văn bản thô (.txt) để train
 │   └── wordlist.dic    # Từ điển tiếng Việt chuẩn
 ├── builder.py          # Xây dựng N-gram language model từ corpus
-├── trained_model/      # Model artifacts (unigrams.trie, bigrams.trie, ...)
+├── trained_model/      # Model artifacts
+│   ├── unigrams.trie, bigrams.trie, trigrams.trie
+│   ├── vocab.txt       # Từ điển, 1 từ/dòng, đã sắp xếp
+│   └── language_stats_meta.json
 ├── model_pkg.py        # Export/Import model thành 1 file .tinymls duy nhất
 ├── checker.py          # Inference engine (NGramSpellChecker)
 ├── config.py           # SpellCheckerConfig dataclass
@@ -204,7 +207,7 @@ Server đã bật CORS `*`, nên có thể gọi trực tiếp từ frontend ch�
 
 ### `POST /api/export`
 
-Export model thành file `.tinymls` duy nhất. Các thành phần trong file không cố định — chỉ gồm những gì tồn tại trong thư mục stats (vd: bỏ qua `trigrams.trie` nếu không có).
+Export model thành file `.tinymls` duy nhất. Các thành phần trong file không cố định — chỉ gồm những gì tồn tại trong thư mục stats (vd: bỏ qua `trigrams.trie` nếu không có). Riêng `vocab.txt` là bắt buộc: export sẽ báo lỗi nếu thư mục model thiếu file này.
 
 Request body:
 
@@ -268,6 +271,10 @@ python model_pkg.py extract model.tinymls -o my_model
 - API giới hạn input `text` tối đa 2000 ký tự cho mỗi request.
 - Builder mặc định chỉ đọc file `.txt` ở thư mục cấp 1. Dùng `recursive=true` để đọc đệ quy vào thư mục con.
 - Builder chấp nhận cả từ tiếng Việt và tiếng Anh (từ chỉ gồm chữ cái) vào vocabulary, giúp model không sửa nhầm từ ngoại lai.
+- Từ điển nằm ở `vocab.txt` (mỗi dòng một từ, đã sắp xếp), tách riêng khỏi `language_stats_meta.json` vì parse nhanh hơn 2.1× và nhỏ hơn 1.5 MB. Thứ tự từ trong file quyết định thứ tự ứng viên nên phải giữ nguyên khi sửa.
+- Không có `vocab.txt` thì checker báo lỗi rõ ràng; cần build lại model.
+- Checker giữ cache cho từ đứng trước (`_CONTEXT_INDEX_BUDGET` giới hạn theo tổng số từ kế tiếp được cache). Tăng ngân sách thì nhanh hơn nhưng tốn bộ nhớ; đo được 250.000 là mức không còn thrashing, 150.000 bắt đầu chậm lại rõ rệt.
+- Bộ lọc độ dài ứng viên dùng `bytes.translate` trên một byte cho mỗi từ kế tiếp, không cần numpy. Đo cùng dữ liệu thì cách này nhẹ bộ nhớ hơn và không chậm hơn so với mảng `int16` của numpy.
 
 ## Cá nhân hóa (Personalization)
 

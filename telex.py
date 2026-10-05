@@ -1,7 +1,7 @@
 from functools import lru_cache
 
 
-@lru_cache(maxsize=100000)
+@lru_cache(maxsize=20000)
 def to_standard_telex(word: str) -> str:
     word = word.lower()
 

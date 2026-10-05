@@ -7,6 +7,8 @@ import zipfile
 
 import marisa_trie
 
+from builder import VOCAB_FILENAME
+
 
 def export_model_package(
     stats_path: str = "trained_model",
@@ -16,7 +18,7 @@ def export_model_package(
 ) -> str:
     components = {
         "config": False, "unigrams": False, "bigrams": False,
-        "trigrams": False, "meta": False, "dictionary": False,
+        "trigrams": False, "meta": False, "vocab": False, "dictionary": False,
     }
 
     with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -29,6 +31,11 @@ def export_model_package(
             zf.write(meta_src, "language_stats_meta.json")
             components["meta"] = True
 
+        vocab_src = os.path.join(stats_path, VOCAB_FILENAME)
+        if os.path.exists(vocab_src):
+            zf.write(vocab_src, VOCAB_FILENAME)
+            components["vocab"] = True
+
         for name in ("unigrams", "bigrams", "trigrams"):
             trie_path = os.path.join(stats_path, f"{name}.trie")
             if os.path.exists(trie_path):
@@ -38,6 +45,12 @@ def export_model_package(
         if dict_path and os.path.exists(dict_path):
             zf.write(dict_path, "dictionary.dic")
             components["dictionary"] = True
+
+    if not components["vocab"]:
+        raise FileNotFoundError(
+            f"Không tìm thấy '{VOCAB_FILENAME}' trong '{stats_path}'. "
+            "Hãy build lại model trước khi export."
+        )
 
     included = [k for k, v in components.items() if v]
     comps = ", ".join(included)
