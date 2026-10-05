@@ -77,7 +77,7 @@ connection.
 | `clear`      | —                  | `status`                                                     |
 
 `check` nhận `personalized: true` để dùng từ và thói quen đã học. Mặc định là
-không, để lời gọi thường không phải nạp thêm bộ nhớ.
+không.
 
 `text` tối đa 2000 ký tự. `context` cần ít nhất 2 phần tử. `top_k` mặc định 5.
 
@@ -229,7 +229,7 @@ cfg = SpellCheckerConfig(stats_path="model.tinymls", dict_path="data/wordlist.di
 
 - Model được nạp trước khi server lắng nghe.
 - Server chỉ phục vụ tiến trình cùng user trên cùng máy.
-- Lần `check` đầu tiên với `personalized: true` sẽ dựng thêm một checker: đo trên model mặc định tốn 0,81 s và 48 MB. Các request sau dùng lại checker đó nên nhanh hơn nhiều.
+- `personalized` là tham số của từng lời gọi `correct_sentence`, không phải trạng thái của checker. Cùng một checker phục vụ cả lời gọi có và không có cá nhân hóa, nên `personalized: true` không phát sinh lần nạp model thứ hai.
 - Builder mặc định chỉ đọc file `.txt` ở thư mục cấp 1. Dùng `--recursive` để đọc đệ quy vào thư mục con.
 - Builder chấp nhận cả từ tiếng Việt và tiếng Anh (từ chỉ gồm chữ cái) vào vocabulary, giúp model không sửa nhầm từ ngoại lai.
 - Từ điển nằm ở `vocab.txt` (mỗi dòng một từ, đã sắp xếp), tách riêng khỏi `language_stats_meta.json` vì parse nhanh hơn 2.1× và nhỏ hơn 1.5 MB. Thứ tự từ trong file quyết định thứ tự ứng viên nên phải giữ nguyên khi sửa.

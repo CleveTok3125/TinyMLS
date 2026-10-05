@@ -54,17 +54,23 @@ def apply_case_pattern(word: str, pattern: CasePattern) -> str:
 
 
 class NGramSpellChecker:
+    """Suggestion engine for one model.
+
+    Personalization is a per-call argument rather than instance state: it is the
+    only thing that varies between requests against the same model, so keeping
+    it out of the constructor lets one instance serve both personalised and
+    plain checks instead of paying a second full model load.
+    """
+
     def __init__(
         self,
         config: SpellCheckerConfig,
         debug: bool = False,
         detail_log: bool = False,
-        personalization: PersonalizationManager | None = None,
     ) -> None:
         self.cfg = config
         self.debug = debug
         self.detail_log = detail_log
-        self._personalization = personalization
         self._archive: ModelArchive | None = None
         self._global_telex_cache: dict[tuple[str, int], tuple[str, ...]] = {}
         self._context_index_cache: OrderedDict[str, tuple[list[str], list[str], bytes]] = OrderedDict()
@@ -337,7 +343,10 @@ class NGramSpellChecker:
         return entry
 
     def get_candidates(  # noqa: C901, PLR0912
-        self, error_word: str, prev_word: str | None = None
+        self,
+        error_word: str,
+        prev_word: str | None = None,
+        personalization: PersonalizationManager | None = None,
     ) -> list[str]:
         candidates: list[str] = []
 
@@ -392,14 +401,14 @@ class NGramSpellChecker:
 
         candidates = candidates[: self._top_n]
 
-        if self._personalization:
+        if personalization:
             err_first = (
                 unicodedata.normalize("NFC", error_word)[0] if error_word else ""
             )
             low_len, high_len = self.allowed_length_window(error_len)
             # Only learned words sharing the token's first character can ever be
             # accepted below, so ask for that slice instead of every learned word.
-            for pw_norm in self._personalization.get_priority_words(err_first):
+            for pw_norm in personalization.get_priority_words(err_first):
                 if pw_norm in candidates:
                     continue
                 pw_len = len(to_standard_telex(pw_norm))
@@ -554,6 +563,7 @@ class NGramSpellChecker:
         exact_bonus: float,
         context_base: tuple[int, int] = (0, 0),
         unigram_count: int = 0,
+        personalization: PersonalizationManager | None = None,
     ) -> float:
         """Path-dependent half of the score; see candidate_base_score."""
         if prev_word:
@@ -572,8 +582,8 @@ class NGramSpellChecker:
         score = (self._sim_weight * sim_feat) + (self._context_weight * ctx_feat)
         score += exact_bonus
 
-        if self._personalization:
-            score += self._personalization.compute_boost(
+        if personalization:
+            score += personalization.compute_boost(
                 candidate, prev_word, prev_prev_word
             )
 
@@ -585,6 +595,7 @@ class NGramSpellChecker:
         error_word: str,
         prev_word: str | None,
         prev_prev_word: str | None = None,
+        personalization: PersonalizationManager | None = None,
     ) -> float:
         sim_feat, p_uni, exact_bonus, candidate, error_word, uni_count = (
             self.candidate_base_score(candidate, error_word)
@@ -592,7 +603,7 @@ class NGramSpellChecker:
         score = self.score_from_base(
             candidate, prev_word, prev_prev_word, sim_feat, p_uni, exact_bonus,
             self.context_base_counts(prev_prev_word, prev_word) if prev_word else (0, 0),
-            uni_count,
+            uni_count, personalization,
         )
 
         if self.debug and self.detail_log:
@@ -604,10 +615,6 @@ class NGramSpellChecker:
             print(f"         score: {score:.4f}")
 
         return score
-
-    def learn_selection(self, context: list[str]) -> None:
-        if self._personalization:
-            self._personalization.learn_selection(context)
 
     def calculate_exact_match_bonus(self, candidate: str, error_word: str) -> float:
         if candidate != error_word:
@@ -642,7 +649,12 @@ class NGramSpellChecker:
             return True
         return False
 
-    def correct_sentence(self, sentence: str, top_k: int = 5) -> list[str]:  # noqa: C901, PLR0912, PLR0915
+    def correct_sentence(
+        self,
+        sentence: str,
+        top_k: int = 5,
+        personalization: PersonalizationManager | None = None,
+    ) -> list[str]:  # noqa: C901, PLR0912, PLR0915
         original_words: list[str] = sentence.split()
         case_patterns = [detect_case_pattern(w) for w in original_words]
         words: list[str] = [w.lower() for w in original_words]
@@ -670,10 +682,17 @@ class NGramSpellChecker:
                 candidates_set = {}
                 if not reset_context_next_step and paths:
                     for _, _, prev_cand in paths.values():
-                        for c in self.get_candidates(current_word, prev_word=prev_cand):
+                        for c in self.get_candidates(
+                            current_word,
+                            prev_word=prev_cand,
+                            personalization=personalization,
+                        ):
                             candidates_set[c] = None
 
-                for c in self.get_candidates(current_word, prev_word=None):
+                for c in self.get_candidates(
+                    current_word, prev_word=None,
+                    personalization=personalization,
+                ):
                     candidates_set[c] = None
                 candidates = list(candidates_set.keys())
 
@@ -714,7 +733,8 @@ class NGramSpellChecker:
 
                 if reset_context_next_step or not paths:
                     step_score = self.score_from_base(
-                        norm_cand, None, None, sim_feat, p_uni, exact_bonus
+                        norm_cand, None, None, sim_feat, p_uni, exact_bonus,
+                        personalization=personalization,
                     )
 
                     best_history = []
@@ -758,6 +778,7 @@ class NGramSpellChecker:
                             norm_cand, prev_cand, prev_prev_cand,
                             sim_feat, p_uni, exact_bonus,
                             path_context_bases[prev_cand], uni_count,
+                            personalization,
                         )
 
                         total_score = prev_score + step_score

@@ -23,7 +23,7 @@ SERVER_DATA_FOLDER = "data/corpus"
 MAX_INPUT_CHARS = 2000
 MIN_CONTEXT_LEN = 2
 
-CheckerCacheKey = tuple[str, str | None, str | None, bool, bool, str | None]
+CheckerCacheKey = tuple[str, str | None, str | None, bool, bool]
 
 
 class SpellCheckerService:
@@ -65,36 +65,26 @@ class SpellCheckerService:
                 )
             return self._personalization
 
-    def get_checker(
-        self,
-        debug: bool = False,
-        detail: bool = False,
-        personalization: PersonalizationManager | None = None,
-    ) -> NGramSpellChecker:
+    def get_checker(self, debug: bool = False, detail: bool = False) -> NGramSpellChecker:
         config = self.server_config()
         if not os.path.exists(config.stats_path):
             raise FileNotFoundError(
                 f"Không tìm thấy thư mục dữ liệu thống kê tại '{config.stats_path}'."
             )
 
-        pers_hash = id(personalization) if personalization else None
         cache_key: CheckerCacheKey = (
             self._config_path,
             config.stats_path,
             config.dict_path,
             debug,
             detail,
-            pers_hash,
         )
         with self._cache_lock:
             checker = self._cache.get(cache_key)
             if checker is None:
                 with contextlib.redirect_stdout(io.StringIO()):
                     checker = NGramSpellChecker(
-                        config=config,
-                        debug=debug,
-                        detail_log=detail,
-                        personalization=personalization,
+                        config=config, debug=debug, detail_log=detail
                     )
                 self._cache[cache_key] = checker
         return checker
@@ -112,8 +102,10 @@ class SpellCheckerService:
 
         start_time = time.perf_counter()
         personalization = self.personalization() if personalized else None
-        checker = self.get_checker(personalization=personalization)
-        suggestions = checker.correct_sentence(text, top_k=top_k)
+        checker = self.get_checker()
+        suggestions = checker.correct_sentence(
+            text, top_k=top_k, personalization=personalization
+        )
 
         return {
             "text": text,

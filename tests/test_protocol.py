@@ -350,3 +350,69 @@ def test_learn_does_not_build_a_checker(tmp_path, model_dir):
     svc.learn(["toi", "uong", "thuoc"])
 
     assert len(svc._cache) == before
+
+
+def test_personalized_check_reuses_the_loaded_checker(tmp_path, model_dir):
+    """Personalisation varies per request, so it must not fork a second model load."""
+    from service import SpellCheckerService
+
+    svc = SpellCheckerService(model_path=model_dir, data_dir=str(tmp_path))
+    svc.preload()
+    checker = svc.get_checker()
+
+    svc.check("toi dang go tieng viet", top_k=1, personalized=True)
+
+    assert svc.get_checker() is checker
+    assert len(svc._cache) == 1
+
+
+def test_personalization_still_changes_the_result(tmp_path, model_dir):
+    """Sharing one checker must not let the personalised path lose its boost.
+
+    Uses words outside the test corpus so the plain path has no reason to pick
+    them on its own and any difference comes from the learned boost.
+    """
+    from service import SpellCheckerService
+
+    svc = SpellCheckerService(model_path=model_dir, data_dir=str(tmp_path))
+    svc.learn_text("xilinzarow khoaimon")
+    text = "toi dang xilinzarow"
+
+    plain = svc.check(text, top_k=1)
+    tuned = svc.check(text, top_k=1, personalized=True)
+
+    assert plain["personalized"] is False
+    assert tuned["personalized"] is True
+    assert plain["best_correction"] == "tôi là người"
+    assert tuned["best_correction"] == "tôi là xilinzarow"
+
+
+def test_one_checker_gives_the_same_answer_either_way(tmp_path, model_dir):
+    """Interleaved personalised and plain checks must not leak state into each other."""
+    from service import SpellCheckerService
+
+    svc = SpellCheckerService(model_path=model_dir, data_dir=str(tmp_path))
+    texts = ["toi dang go tieng viet", "ngày mai là thứ hai", "khoong"]
+
+    plain_only = [svc.check(t, top_k=3)["suggestions"] for t in texts]
+    for _ in range(2):
+        for t in texts:
+            svc.check(t, top_k=3, personalized=True)
+    plain_after = [svc.check(t, top_k=3)["suggestions"] for t in texts]
+
+    assert plain_only == plain_after
+
+
+def test_learned_words_are_invisible_to_plain_checks(tmp_path, model_dir):
+    """A plain check after a personalised one must not inherit its boost."""
+    from service import SpellCheckerService
+
+    svc = SpellCheckerService(model_path=model_dir, data_dir=str(tmp_path))
+    svc.learn_text("xilinzarow khoaimon")
+    text = "toi dang xilinzarow"
+
+    plain_before = svc.check(text, top_k=1)["best_correction"]
+    svc.check(text, top_k=1, personalized=True)
+    plain_after = svc.check(text, top_k=1)["best_correction"]
+
+    assert plain_before == plain_after == "tôi là người"
