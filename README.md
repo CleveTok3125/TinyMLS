@@ -8,13 +8,13 @@ Yêu cầu cài dependency trong `requirements.txt`.
 
 ```bash
 # Dùng thư mục trained_model/ (mặc định)
-python main.py
+python main.py serve
 
 # Dùng file .tinymls
-python main.py model.tinymls
+python main.py serve model.tinymls
 
 # Chỉ định socket khác
-python main.py --socket /tmp/tinymls.sock
+python main.py serve --socket /tmp/tinymls.sock
 ```
 
 Socket đặt ở `$XDG_RUNTIME_DIR/tinymls.sock` — đúng theo XDG Base Directory
@@ -27,7 +27,7 @@ thay thế**, vì mọi vị trí khác đều không phải chuẩn. Đặt bi�
 
 ```bash
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
-python main.py
+python main.py serve
 ```
 
 Server nạp model trước khi lắng nghe, nên lần request đầu không phải chờ nạp.
@@ -134,20 +134,26 @@ cấu hình ở mức người dùng sẽ ghi đè bản đi kèm dự án.
 
 ## Build và export
 
+Mỗi lệnh có bộ tham số riêng; `python main.py --help` liệt kê lệnh, và
+`python main.py <lệnh> --help` liệt kê tham số của lệnh đó.
+
 ```bash
 # Xây dựng lại thống kê N-gram từ corpus
-python main.py --build
-python main.py --build --corpus /path/to/corpus --workers 4 --recursive
+python main.py build
+python main.py build --corpus /path/to/corpus --workers 4 --recursive
 
 # Export model thành một file
-python main.py --export model.tinymls
+python main.py export model.tinymls
 
 # Công cụ riêng
 python model_pkg.py export --stats trained_model --dict data/wordlist.dic -o model.tinymls
 python model_pkg.py extract model.tinymls -o my_model
 ```
 
-Sau `--build` cần khởi động lại server để nạp model mới. Build chạy ở tiến trình
+Tham số vị trí của `build` là thư mục ghi model, mặc định lấy `stats_path` trong
+config. Cả `build` và `export` đều không cần `XDG_RUNTIME_DIR`.
+
+Sau `build` cần khởi động lại server để nạp model mới. Build chạy ở tiến trình
 riêng nên không phối hợp với request đang chờ.
 
 ## Cấu trúc thư mục
@@ -182,7 +188,7 @@ TinyMLS/
 ├── vietnamese.py       # Chuẩn hoá văn bản tiếng Việt
 ├── paths.py            # Đường dẫn theo XDG Base Directory
 ├── telex.py            # Telex encoding conversion
-└── main.py             # Entry point
+└── main.py             # Entry point: serve / build / export
 ```
 
 ## Kiểm thử
